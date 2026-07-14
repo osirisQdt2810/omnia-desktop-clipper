@@ -99,17 +99,29 @@ class MacAXContextProvider(ContextProvider):
     def _focused_text() -> (
         str
     ):  # pragma: no cover - macOS + Accessibility permission only
-        """Return the plain text of the system-wide focused UI element (or ``""``)."""
+        """Return the plain text of the frontmost app's focused UI element (or ``""``).
+
+        Queries the FRONTMOST application's AX element (via its pid) rather than the system-wide
+        element: ``AXUIElementCreateSystemWide()`` + ``kAXFocusedUIElementAttribute`` returns
+        ``kAXErrorCannotComplete`` (-25204) here, whereas the app-scoped element reliably yields
+        the focused text field's full value (which is what makes the enclosing sentence available).
+        """
+        from AppKit import NSWorkspace
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
-            AXUIElementCreateSystemWide,
+            AXUIElementCreateApplication,
+            AXUIElementSetMessagingTimeout,
             kAXFocusedUIElementAttribute,
             kAXValueAttribute,
         )
 
-        system = AXUIElementCreateSystemWide()
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return ""
+        ax_app = AXUIElementCreateApplication(app.processIdentifier())
+        AXUIElementSetMessagingTimeout(ax_app, 2.0)  # avoid a hang on an unresponsive app
         err, focused = AXUIElementCopyAttributeValue(
-            system, kAXFocusedUIElementAttribute, None
+            ax_app, kAXFocusedUIElementAttribute, None
         )
         if err != 0 or focused is None:
             return ""
