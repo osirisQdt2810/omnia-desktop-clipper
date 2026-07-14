@@ -75,11 +75,17 @@ The app lives in the **system tray / menu bar** (no main window). Its menu: **Ca
 
 ### Build a double-click app (no Python for end users)
 
-PyInstaller freezes it into a native app. **Run on each target OS** (it can't cross-compile):
+PyInstaller freezes it into a native app. **Run on each target OS** (it can't cross-compile).
+Do it in a **throwaway virtualenv** so the build deps never touch your system Python (PyInstaller
+only *reads* the env and copies packages into the frozen app — it installs nothing; only the
+`pip install` below writes to an env, which the venv isolates):
 
 ```bash
+python -m venv .venv-build
+source .venv-build/bin/activate      # Windows: .venv-build\Scripts\activate
 pip install -r requirements.txt pyinstaller
 python build.py
+deactivate                           # system Python untouched
 ```
 
 Output in `dist/`: `Omnia Desktop Clipper.app` (macOS) · `Omnia Desktop Clipper.exe` (Windows) ·
