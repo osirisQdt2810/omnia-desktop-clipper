@@ -231,8 +231,13 @@ class ClipperApp(QObject):
         self._ocr_requested.emit()
 
     def _on_select_gesture(self, x: int, y: int) -> None:
-        """Mouse-watcher callback (listener thread): hop to the main thread to show the "+"."""
-        self._plus_requested.emit(x, y)
+        """Mouse-watcher callback (listener thread): hop to the main thread to show the "+".
+
+        pynput reports coordinates as floats; cast to int here because the queued cross-thread
+        ``pyqtSignal(int, int)`` marshals a Python float into the C++ int slot as garbage
+        (the "+" then lands at an absurd off-screen position).
+        """
+        self._plus_requested.emit(int(x), int(y))
 
     def _show_plus(self, x: int, y: int) -> None:
         """Show the floating "+" near the cursor (Qt main thread)."""
