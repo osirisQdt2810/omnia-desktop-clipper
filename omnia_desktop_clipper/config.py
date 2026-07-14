@@ -92,6 +92,9 @@ class Config:
     autogen: bool = True
     hotkey: str = field(default_factory=default_hotkey)
     ocr_hotkey: str = field(default_factory=default_ocr_hotkey)
+    # Show a floating "+" near the cursor on a double-click / drag-select in any app; clicking it
+    # runs the same capture as the hotkey. A global mouse hook (needs Input Monitoring on macOS).
+    plus_overlay: bool = True
 
     def tags(self) -> list[str]:
         """Return the note tags: the source tag + ``omnia-autogen`` if enabled."""
@@ -132,6 +135,7 @@ class Config:
             autogen=_as_bool(data.get("autogen"), base.autogen),
             hotkey=_as_str(data.get("hotkey"), base.hotkey),
             ocr_hotkey=_as_str(data.get("ocr_hotkey"), base.ocr_hotkey),
+            plus_overlay=_as_bool(data.get("plus_overlay"), base.plus_overlay),
         )
 
 

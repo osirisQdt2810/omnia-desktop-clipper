@@ -27,6 +27,8 @@ from .capture.context import ContextProvider, build_context_provider
 from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
+from .mouse_watcher import GlobalMouseWatcher
+from .ui.plus_overlay import PlusOverlay
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
 from .ui.settings import SettingsDialog
@@ -36,6 +38,25 @@ _TOAST_TITLE = "Omnia Desktop Clipper"
 _MAX_TOAST_WORD = 40
 
 
+def _warm_macos_trust_cache() -> None:
+    """Pre-resolve pyobjc's ``AXIsProcessTrusted`` on the main thread before starting pynput.
+
+    pyobjc's lazy constant import is NOT thread-safe — its ``funcmap.pop`` is destructive — so the
+    two-plus pynput listener threads (the hotkeys and the "+" mouse hook) racing its FIRST
+    resolution crash with ``KeyError: 'AXIsProcessTrusted'`` and die silently: no hotkey, no "+".
+    Resolving it once here, single-threaded, caches it so the listener threads read a ready
+    attribute. macOS-only; best-effort (never raises).
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import HIServices  # from pyobjc-framework-ApplicationServices (pynput's own access path)
+
+        HIServices.AXIsProcessTrusted()
+    except Exception:
+        pass
+
+
 class ClipperApp(QObject):
     """The application controller: owns config and the wired components."""
 
@@ -43,6 +64,9 @@ class ClipperApp(QObject):
     # slots on the Qt main thread where this QObject lives.
     _capture_requested = pyqtSignal()
     _ocr_requested = pyqtSignal()
+    # Fired from the mouse-watcher thread with the cursor position; the queued connection shows
+    # the floating "+" on the Qt main thread.
+    _plus_requested = pyqtSignal(int, int)
 
     def __init__(self, app: QApplication) -> None:
         """Build and wire every component from the loaded config.
@@ -68,16 +92,26 @@ class ClipperApp(QObject):
         )
         self._hotkey = GlobalHotkey(self._config.hotkey, self._on_hotkey)
         self._ocr_hotkey = GlobalHotkey(self._config.ocr_hotkey, self._on_ocr_hotkey)
+        # Floating "+": a global mouse hook detects a select gesture; we capture the selection
+        # THEN (source app still focused) and show the "+"; clicking it adds the captured note.
+        self._plus_overlay = PlusOverlay(self._on_plus_clicked)
+        self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
+        # The (word, context) captured at gesture time, consumed when the "+" is clicked.
+        self._pending_capture: tuple[str, str] | None = None
 
         self._capture_requested.connect(self.capture_and_add)
         self._ocr_requested.connect(self.capture_ocr_and_add)
+        self._plus_requested.connect(self._show_plus)
         self._app.aboutToQuit.connect(self._shutdown)
 
     def start(self) -> None:
-        """Show the tray icon and start listening for the global hotkeys."""
+        """Show the tray icon and start the global hotkeys (+ the "+" mouse hook if enabled)."""
+        _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
         self._tray.show()
         self._hotkey.start()
         self._ocr_hotkey.start()
+        if self._config.plus_overlay:
+            self._mouse_watcher.start()
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
@@ -171,6 +205,7 @@ class ClipperApp(QObject):
         )
         hotkey_changed = new_config.hotkey != self._config.hotkey
         ocr_hotkey_changed = new_config.ocr_hotkey != self._config.ocr_hotkey
+        plus_changed = new_config.plus_overlay != self._config.plus_overlay
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
@@ -182,6 +217,12 @@ class ClipperApp(QObject):
             self._ocr_hotkey.stop()
             self._ocr_hotkey = GlobalHotkey(new_config.ocr_hotkey, self._on_ocr_hotkey)
             self._ocr_hotkey.start()
+        if plus_changed:
+            if new_config.plus_overlay:
+                self._mouse_watcher.start()
+            else:
+                self._mouse_watcher.stop()
+                self._plus_overlay.hide()
 
     def _on_hotkey(self) -> None:
         """Capture-hotkey callback (worker thread): hop to the Qt main thread."""
@@ -191,10 +232,49 @@ class ClipperApp(QObject):
         """OCR-hotkey callback (worker thread): hop to the Qt main thread."""
         self._ocr_requested.emit()
 
+    def _on_select_gesture(self, x: int, y: int) -> None:
+        """Mouse-watcher callback (listener thread): hop to the main thread to show the "+".
+
+        pynput reports coordinates as floats; cast to int here because the queued cross-thread
+        ``pyqtSignal(int, int)`` marshals a Python float into the C++ int slot as garbage
+        (the "+" then lands at an absurd off-screen position).
+        """
+        self._plus_requested.emit(int(x), int(y))
+
+    def _show_plus(self, x: int, y: int) -> None:
+        """Capture the selection NOW, then show the "+" near the cursor (Qt main thread).
+
+        Capturing here — at gesture time, while the SOURCE app is still focused and the text is
+        still selected — is essential: clicking the "+" activates our app and the source app
+        loses its selection, so a copy taken at click time grabs nothing (the note never adds).
+        As a bonus this makes the "+" appear only when text is actually selected, not on every
+        double-click. The capture runs on the Qt main thread (``QtClipboard`` is main-thread-only),
+        which only delays the "+" by the copy's settle time; the source app (a separate process)
+        is not blocked.
+        """
+        try:
+            selection = self._capture.capture()
+        except Exception:  # capture backend / permission error: best-effort, show nothing
+            return
+        if not selection:
+            return  # nothing selected -> no "+"
+        word = selection.strip()
+        context = self._context.resolve(selection)
+        self._pending_capture = (word, context)
+        self._plus_overlay.show_at(x, y)
+
+    def _on_plus_clicked(self) -> None:
+        """The floating "+" was clicked: confirm + add the capture taken at gesture time."""
+        pending = self._pending_capture
+        self._pending_capture = None
+        if pending is not None:
+            self._confirm_and_add(*pending)
+
     def _shutdown(self) -> None:
-        """Release the OS hotkey hooks on quit."""
+        """Release the OS hotkey + mouse hooks on quit."""
         self._hotkey.stop()
         self._ocr_hotkey.stop()
+        self._mouse_watcher.stop()
 
     def _build_client(self) -> AnkiConnectClient:
         """Construct an AnkiConnect client from the current config."""
