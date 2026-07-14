@@ -3,10 +3,12 @@
 A small **standalone desktop app** (macOS / Windows / Ubuntu) that lets you capture a
 **word (or phrase) + its context** from *any* application — PDF viewers, Word, editors,
 terminals, even non-selectable text via **OCR** — and send it straight into your running Anki
-as a new note. It is the desktop sibling of the [Omnia Web Clipper](../omnia-web-clipper/)
-browser extension and speaks the **exact same AnkiConnect contract**, so the
-[Omnia](../../README.md) add-on's **Smart Notes / integration gateway** auto-generates the card
-with **no Anki-side change** (the add-on ships a matching `desktop_clipper` integration).
+as a new note. It is the desktop sibling of the
+[Omnia Web Clipper](https://github.com/osirisQdt2810/omnia-web-clipper) browser extension and
+speaks the **exact same AnkiConnect contract**, so the
+[Omnia](https://github.com/osirisQdt2810/omnia) add-on's **Smart Notes / integration gateway**
+auto-generates the card with **no Anki-side change** (the add-on ships a matching
+`desktop_clipper` integration).
 
 Two ways to capture, both ending in a confirm popup → Anki:
 
