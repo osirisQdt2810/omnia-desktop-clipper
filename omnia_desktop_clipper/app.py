@@ -38,6 +38,25 @@ _TOAST_TITLE = "Omnia Desktop Clipper"
 _MAX_TOAST_WORD = 40
 
 
+def _warm_macos_trust_cache() -> None:
+    """Pre-resolve pyobjc's ``AXIsProcessTrusted`` on the main thread before starting pynput.
+
+    pyobjc's lazy constant import is NOT thread-safe — its ``funcmap.pop`` is destructive — so the
+    two-plus pynput listener threads (the hotkeys and the "+" mouse hook) racing its FIRST
+    resolution crash with ``KeyError: 'AXIsProcessTrusted'`` and die silently: no hotkey, no "+".
+    Resolving it once here, single-threaded, caches it so the listener threads read a ready
+    attribute. macOS-only; best-effort (never raises).
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import HIServices  # from pyobjc-framework-ApplicationServices (pynput's own access path)
+
+        HIServices.AXIsProcessTrusted()
+    except Exception:
+        pass
+
+
 class ClipperApp(QObject):
     """The application controller: owns config and the wired components."""
 
@@ -85,6 +104,7 @@ class ClipperApp(QObject):
 
     def start(self) -> None:
         """Show the tray icon and start the global hotkeys (+ the "+" mouse hook if enabled)."""
+        _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
         self._tray.show()
         self._hotkey.start()
         self._ocr_hotkey.start()
