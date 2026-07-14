@@ -81,7 +81,16 @@ class ClipperApp(QObject):
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
-        selection = self._capture.capture()
+        try:
+            selection = self._capture.capture()
+        except Exception as exc:  # capture must never crash the app (mirror the OCR path)
+            # Synthesising the copy keystroke can raise without Accessibility/Input-Monitoring
+            # permission (macOS) or under Wayland — toast instead of dying in the queued slot.
+            self._tray.show_message(
+                f"{_TOAST_TITLE} — capture failed",
+                f"Couldn't capture the selection ({exc}). Check accessibility/input permissions.",
+            )
+            return
         if not selection:
             self._tray.show_message(_TOAST_TITLE, "Nothing was selected to capture.")
             return

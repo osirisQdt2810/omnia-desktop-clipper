@@ -10,9 +10,18 @@ version = "0.1.0"
 description = "System-wide desktop clipper that sends selected text to Anki via AnkiConnect (Omnia)."
 readme = "README.md"
 requires-python = ">=3.10"
+# Keep in sync with requirements.txt (the runtime source of truth). OCR is an advertised core
+# feature and build.py bundles its native libs, so its deps belong in the installed package too —
+# otherwise `pip install .` yields a build whose screen-OCR path always fails to import.
 dependencies = [
     "PyQt6>=6.6",
     "pynput>=1.7",
+    # >=1.2 (not >=1.3): rapidocr-onnxruntime 1.3+ caps Python at <3.13, so on 3.13/3.14 only
+    # 1.2.x is installable — pip resolves the newest wheel compatible with the running Python.
+    "rapidocr-onnxruntime>=1.2",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "pyobjc-framework-ApplicationServices>=10.0 ; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

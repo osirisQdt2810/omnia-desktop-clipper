@@ -100,6 +100,32 @@ class TestConfigRoundTrip:
         assert path.exists()
 
 
+class TestConfigRobustness:
+    """A corrupt/unreadable config must not brick startup, and saves are atomic."""
+
+    def test_corrupt_json_falls_back_to_defaults(self, tmp_path) -> None:
+        path = tmp_path / "config.json"
+        path.write_text('{"deck_name": "X", oops', encoding="utf-8")  # truncated / invalid JSON
+        assert load(path) == Config()  # no raise; defaults
+
+    def test_non_utf8_file_falls_back_to_defaults(self, tmp_path) -> None:
+        path = tmp_path / "config.json"
+        path.write_bytes(b"\xff\xfe\x00bad")  # not valid UTF-8
+        assert load(path) == Config()  # no raise; defaults
+
+    def test_non_object_json_falls_back_to_defaults(self, tmp_path) -> None:
+        path = tmp_path / "config.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert load(path) == Config()
+
+    def test_save_is_atomic_leaving_no_temp_file(self, tmp_path) -> None:
+        path = tmp_path / "config.json"
+        save(Config(deck_name="Atomic"), path)
+        assert load(path).deck_name == "Atomic"
+        # The sibling temp file used for the atomic replace must not linger.
+        assert list(tmp_path.glob("*.tmp")) == []
+
+
 class TestConfigDir:
     """``config_dir`` resolves the correct per-OS location."""
 
