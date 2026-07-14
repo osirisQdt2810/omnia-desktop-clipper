@@ -8,6 +8,10 @@ __pycache__/
 # Local user config / secrets (never commit)
 config.json
 
+# Virtualenvs (the README's throwaway build venv + any local dev venv)
+.venv/
+.venv-build/
+
 # PyInstaller build output (produced per-OS by `python build.py`)
 build/
 dist/
