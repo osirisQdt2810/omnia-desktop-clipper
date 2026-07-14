@@ -92,10 +92,12 @@ class ClipperApp(QObject):
         )
         self._hotkey = GlobalHotkey(self._config.hotkey, self._on_hotkey)
         self._ocr_hotkey = GlobalHotkey(self._config.ocr_hotkey, self._on_ocr_hotkey)
-        # Floating "+": a global mouse hook detects a select gesture and shows the "+" near the
-        # cursor; clicking it runs the same capture as the hotkey.
+        # Floating "+": a global mouse hook detects a select gesture; we capture the selection
+        # THEN (source app still focused) and show the "+"; clicking it adds the captured note.
         self._plus_overlay = PlusOverlay(self._on_plus_clicked)
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
+        # The (word, context) captured at gesture time, consumed when the "+" is clicked.
+        self._pending_capture: tuple[str, str] | None = None
 
         self._capture_requested.connect(self.capture_and_add)
         self._ocr_requested.connect(self.capture_ocr_and_add)
@@ -240,12 +242,33 @@ class ClipperApp(QObject):
         self._plus_requested.emit(int(x), int(y))
 
     def _show_plus(self, x: int, y: int) -> None:
-        """Show the floating "+" near the cursor (Qt main thread)."""
+        """Capture the selection NOW, then show the "+" near the cursor (Qt main thread).
+
+        Capturing here — at gesture time, while the SOURCE app is still focused and the text is
+        still selected — is essential: clicking the "+" activates our app and the source app
+        loses its selection, so a copy taken at click time grabs nothing (the note never adds).
+        As a bonus this makes the "+" appear only when text is actually selected, not on every
+        double-click. The capture runs on the Qt main thread (``QtClipboard`` is main-thread-only),
+        which only delays the "+" by the copy's settle time; the source app (a separate process)
+        is not blocked.
+        """
+        try:
+            selection = self._capture.capture()
+        except Exception:  # capture backend / permission error: best-effort, show nothing
+            return
+        if not selection:
+            return  # nothing selected -> no "+"
+        word = selection.strip()
+        context = self._context.resolve(selection)
+        self._pending_capture = (word, context)
         self._plus_overlay.show_at(x, y)
 
     def _on_plus_clicked(self) -> None:
-        """The floating "+" was clicked: run the same capture as the hotkey."""
-        self.capture_and_add()
+        """The floating "+" was clicked: confirm + add the capture taken at gesture time."""
+        pending = self._pending_capture
+        self._pending_capture = None
+        if pending is not None:
+            self._confirm_and_add(*pending)
 
     def _shutdown(self) -> None:
         """Release the OS hotkey + mouse hooks on quit."""

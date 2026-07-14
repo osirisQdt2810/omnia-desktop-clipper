@@ -18,8 +18,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 
 _AUTO_HIDE_MS = 2500
-_CURSOR_OFFSET = 14  # px down-right of the cursor, so the "+" isn't under the pointer
-_SIZE = 30  # the overlay is exactly the button — never a stray default-sized window
+_CURSOR_OFFSET = 12  # px down-right of the cursor, so the "+" isn't under the pointer
+_SIZE = 22  # the overlay is exactly the button — a small dot, never a stray default-sized window
 
 
 class PlusOverlay(QWidget):
@@ -50,8 +50,8 @@ class PlusOverlay(QWidget):
         self._button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._button.setToolTip("Add the selected text to Anki (Omnia)")
         self._button.setStyleSheet(
-            "QPushButton { background:#2f81f7; color:white; border:none; border-radius:15px;"
-            " font-size:20px; font-weight:bold; }"
+            "QPushButton { background:#2f81f7; color:white; border:none; border-radius:11px;"
+            " font-size:14px; font-weight:bold; padding:0; }"
             "QPushButton:hover { background:#1f6fe5; }"
         )
         self._button.clicked.connect(self._handle_click)
