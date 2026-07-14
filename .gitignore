@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local user config / secrets (never commit)
+config.json
+
+# PyInstaller build output (produced per-OS by `python build.py`)
+build/
+dist/
+*.spec

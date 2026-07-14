@@ -1,0 +1,16 @@
+# Runtime dependencies for the Omnia Desktop Clipper.
+
+# GUI (tray, popup, settings, region overlay) + global hotkey / synth-copy.
+# Pure-Python wheels available on macOS, Windows, and Linux.
+PyQt6>=6.6
+pynput>=1.7
+
+# OCR screen-region capture (read text you can't select: scanned/image PDFs, images,
+# apps that block copy/accessibility). CPU only, cross-platform wheels, no PyTorch.
+rapidocr-onnxruntime>=1.3
+Pillow>=10.0
+numpy>=1.24
+
+# macOS only: read the sentence around the selection via the Accessibility API (context).
+# On Windows/Linux the clipper falls back to using the selection as the context.
+pyobjc-framework-ApplicationServices>=10.0 ; sys_platform == "darwin"
