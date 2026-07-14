@@ -20,7 +20,7 @@ _DEFAULT_SETTLE_SECONDS = 0.15
 
 
 class ClipboardAccessor(abc.ABC):
-    """Reads and writes the system clipboard's plain text."""
+    """Reads and writes the system clipboard's plain text, and snapshots its full content."""
 
     @abc.abstractmethod
     def get_text(self) -> str:
@@ -29,6 +29,18 @@ class ClipboardAccessor(abc.ABC):
     @abc.abstractmethod
     def set_text(self, text: str) -> None:
         """Replace the clipboard's plain text with ``text``."""
+
+    @abc.abstractmethod
+    def snapshot(self) -> object:
+        """Return an opaque snapshot of the FULL clipboard (text, image, files, …).
+
+        Paired with :meth:`restore` so a capture can preserve non-text content (an image or
+        copied files) that a plain-text save/restore would silently wipe.
+        """
+
+    @abc.abstractmethod
+    def restore(self, snapshot: object) -> None:
+        """Restore a snapshot previously returned by :meth:`snapshot`."""
 
 
 class CopyEmitter(abc.ABC):
@@ -42,10 +54,11 @@ class CopyEmitter(abc.ABC):
 class ClipboardCapture(SelectionCapture):
     """Capture the selection by synthesising copy and diffing the clipboard.
 
-    It saves the current clipboard, clears it, synthesises the copy shortcut,
-    reads whatever the focused app copied, then restores the original clipboard
-    so the capture is non-destructive. Clearing first lets it distinguish "the
-    app copied the selection" from "nothing was selected" (clipboard stays empty).
+    It snapshots the current clipboard (its FULL content — text, image, or files), clears the
+    text, synthesises the copy shortcut, reads whatever the focused app copied, then restores the
+    snapshot so the capture is non-destructive even when the clipboard held non-text content.
+    Clearing first lets it distinguish "the app copied the selection" from "nothing was selected"
+    (clipboard stays empty).
     """
 
     def __init__(
@@ -71,14 +84,16 @@ class ClipboardCapture(SelectionCapture):
 
     def capture(self) -> str | None:
         """Return the selected text (stripped), or ``None`` if nothing captured."""
-        original = self._clipboard.get_text()
+        # Snapshot the FULL clipboard (not just its text) so restoring can't wipe a copied image
+        # or file list — a plain get_text()/set_text() round-trip would replace those with "".
+        snapshot = self._clipboard.snapshot()
         try:
             self._clipboard.set_text("")
             self._copy_emitter.emit()
             self._sleep(self._settle_seconds)
             captured = self._clipboard.get_text()
         finally:
-            self._clipboard.set_text(original)
+            self._clipboard.restore(snapshot)
         captured = captured.strip()
         return captured or None
 
@@ -99,6 +114,24 @@ class QtClipboard(ClipboardAccessor):
 
     def set_text(self, text: str) -> None:
         self._clipboard.setText(text)
+
+    def snapshot(self) -> object:  # pragma: no cover - needs a live QApplication
+        # Deep-copy every format of the current clipboard so a later clear/copy can't mutate our
+        # saved copy; this preserves non-text content (images, files) across the capture.
+        from PyQt6.QtCore import QMimeData
+
+        source = self._clipboard.mimeData()
+        data = QMimeData()
+        if source is not None:
+            for fmt in source.formats():
+                data.setData(fmt, source.data(fmt))
+        return data
+
+    def restore(self, snapshot: object) -> None:  # pragma: no cover - needs a live QApplication
+        from PyQt6.QtCore import QMimeData
+
+        if isinstance(snapshot, QMimeData):
+            self._clipboard.setMimeData(snapshot)
 
 
 class PynputCopyEmitter(CopyEmitter):

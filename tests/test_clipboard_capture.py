@@ -19,10 +19,16 @@ def _no_sleep(_seconds: float) -> None:
 
 
 class _FakeClipboard(ClipboardAccessor):
-    """An in-memory clipboard that records every value it ever held."""
+    """An in-memory clipboard modelling text AND opaque non-text content (image/files).
 
-    def __init__(self, text: str = "") -> None:
+    ``mime`` stands in for non-text content: when it is set, ``get_text()`` returns ``""`` (as a
+    real clipboard holding an image would), and writing text clears it. ``snapshot``/``restore``
+    round-trip the FULL state so a capture can be verified non-destructive for non-text content.
+    """
+
+    def __init__(self, text: str = "", *, mime: object | None = None) -> None:
         self._text = text
+        self._mime = mime
         self.history: list[str] = [text]
 
     def get_text(self) -> str:
@@ -30,7 +36,14 @@ class _FakeClipboard(ClipboardAccessor):
 
     def set_text(self, text: str) -> None:
         self._text = text
+        self._mime = None  # writing text replaces any non-text content (like a real clipboard)
         self.history.append(text)
+
+    def snapshot(self) -> object:
+        return (self._text, self._mime)
+
+    def restore(self, snapshot: object) -> None:
+        self._text, self._mime = snapshot  # type: ignore[misc]
 
 
 class _FakeCopyEmitter(CopyEmitter):
@@ -88,3 +101,13 @@ class TestClipboardCapture:
 
         assert capture.capture() == "spaced"
         assert clipboard.get_text() == "ORIGINAL"
+
+    def test_preserves_non_text_clipboard_content(self) -> None:
+        # The clipboard holds an image (no text). Capturing a selection must restore the image,
+        # not wipe it — the snapshot/restore round-trip carries non-text content through.
+        clipboard = _FakeClipboard("", mime="IMAGE-DATA")
+        emitter = _FakeCopyEmitter(clipboard, "selected text")
+        capture = ClipboardCapture(clipboard, emitter, sleep=_no_sleep)
+
+        assert capture.capture() == "selected text"
+        assert clipboard.snapshot() == ("", "IMAGE-DATA")  # original non-text content restored

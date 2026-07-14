@@ -10,6 +10,7 @@ defaults (mirroring the web clipper's partial-map behaviour).
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -155,7 +156,12 @@ def load(path: Path | None = None) -> Config:
     path = config_file() if path is None else path
     if not path.exists():
         return Config()
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # A corrupt/truncated/unreadable config must NOT brick startup — a mid-write crash or a
+        # hand-edit typo falls back to defaults rather than raising through ClipperApp.__init__.
+        return Config()
     return Config.from_dict(raw if isinstance(raw, Mapping) else {})
 
 
@@ -171,4 +177,9 @@ def save(config: Config, path: Path | None = None) -> None:
     path = config_file() if path is None else path
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(config.to_dict(), indent=2, ensure_ascii=False)
-    path.write_text(payload + "\n", encoding="utf-8")
+    # Atomic write: a crash/power-loss mid-write must not truncate config.json to a corrupt state
+    # (which load() would then have to fall back from). Write a sibling temp file, then os.replace
+    # — atomic on macOS/Windows/Linux — so the live file is only ever the previous or the new one.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(payload + "\n", encoding="utf-8")
+    os.replace(tmp, path)
