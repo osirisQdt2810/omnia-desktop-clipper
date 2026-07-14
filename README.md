@@ -156,8 +156,9 @@ a clipped note is tagged:
 ["omnia-desktop-clipper", "omnia-autogen"]
 ```
 
-Enable auto-generation for it in Anki under **Omnia → Smart Notes → Integrations** (toggle *Omnia
-Desktop Clipper*). The source tag is configurable in Settings (e.g. set it to `omnia-web-clipper`
+Enable auto-generation for it in Anki under **Tools → Omnia** → the **Smart Notes** plugin's
+**Configure** → **Integrations** tab (toggle *Omnia Desktop Clipper*). The source tag is
+configurable in Settings (e.g. set it to `omnia-web-clipper`
 to share the browser clipper's toggle).
 
 ---
@@ -245,7 +246,7 @@ omnia-desktop-clipper/
 └── pyproject.toml
 ```
 
-### Roadmap (see ADR-007)
+### Roadmap
 
 Done: hotkey + clipboard selection, **context** via macOS Accessibility (fallback elsewhere),
 **CPU OCR** screen capture, AnkiConnect-backed settings, the dedicated add-on integration, and
