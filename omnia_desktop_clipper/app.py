@@ -27,6 +27,8 @@ from .capture.context import ContextProvider, build_context_provider
 from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
+from .mouse_watcher import GlobalMouseWatcher
+from .ui.plus_overlay import PlusOverlay
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
 from .ui.settings import SettingsDialog
@@ -43,6 +45,9 @@ class ClipperApp(QObject):
     # slots on the Qt main thread where this QObject lives.
     _capture_requested = pyqtSignal()
     _ocr_requested = pyqtSignal()
+    # Fired from the mouse-watcher thread with the cursor position; the queued connection shows
+    # the floating "+" on the Qt main thread.
+    _plus_requested = pyqtSignal(int, int)
 
     def __init__(self, app: QApplication) -> None:
         """Build and wire every component from the loaded config.
@@ -68,16 +73,23 @@ class ClipperApp(QObject):
         )
         self._hotkey = GlobalHotkey(self._config.hotkey, self._on_hotkey)
         self._ocr_hotkey = GlobalHotkey(self._config.ocr_hotkey, self._on_ocr_hotkey)
+        # Floating "+": a global mouse hook detects a select gesture and shows the "+" near the
+        # cursor; clicking it runs the same capture as the hotkey.
+        self._plus_overlay = PlusOverlay(self._on_plus_clicked)
+        self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
 
         self._capture_requested.connect(self.capture_and_add)
         self._ocr_requested.connect(self.capture_ocr_and_add)
+        self._plus_requested.connect(self._show_plus)
         self._app.aboutToQuit.connect(self._shutdown)
 
     def start(self) -> None:
-        """Show the tray icon and start listening for the global hotkeys."""
+        """Show the tray icon and start the global hotkeys (+ the "+" mouse hook if enabled)."""
         self._tray.show()
         self._hotkey.start()
         self._ocr_hotkey.start()
+        if self._config.plus_overlay:
+            self._mouse_watcher.start()
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
@@ -171,6 +183,7 @@ class ClipperApp(QObject):
         )
         hotkey_changed = new_config.hotkey != self._config.hotkey
         ocr_hotkey_changed = new_config.ocr_hotkey != self._config.ocr_hotkey
+        plus_changed = new_config.plus_overlay != self._config.plus_overlay
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
@@ -182,6 +195,12 @@ class ClipperApp(QObject):
             self._ocr_hotkey.stop()
             self._ocr_hotkey = GlobalHotkey(new_config.ocr_hotkey, self._on_ocr_hotkey)
             self._ocr_hotkey.start()
+        if plus_changed:
+            if new_config.plus_overlay:
+                self._mouse_watcher.start()
+            else:
+                self._mouse_watcher.stop()
+                self._plus_overlay.hide()
 
     def _on_hotkey(self) -> None:
         """Capture-hotkey callback (worker thread): hop to the Qt main thread."""
@@ -191,10 +210,23 @@ class ClipperApp(QObject):
         """OCR-hotkey callback (worker thread): hop to the Qt main thread."""
         self._ocr_requested.emit()
 
+    def _on_select_gesture(self, x: int, y: int) -> None:
+        """Mouse-watcher callback (listener thread): hop to the main thread to show the "+"."""
+        self._plus_requested.emit(x, y)
+
+    def _show_plus(self, x: int, y: int) -> None:
+        """Show the floating "+" near the cursor (Qt main thread)."""
+        self._plus_overlay.show_at(x, y)
+
+    def _on_plus_clicked(self) -> None:
+        """The floating "+" was clicked: run the same capture as the hotkey."""
+        self.capture_and_add()
+
     def _shutdown(self) -> None:
-        """Release the OS hotkey hooks on quit."""
+        """Release the OS hotkey + mouse hooks on quit."""
         self._hotkey.stop()
         self._ocr_hotkey.stop()
+        self._mouse_watcher.stop()
 
     def _build_client(self) -> AnkiConnectClient:
         """Construct an AnkiConnect client from the current config."""

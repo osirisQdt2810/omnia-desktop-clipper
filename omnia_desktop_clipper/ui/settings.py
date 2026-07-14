@@ -64,6 +64,10 @@ class SettingsDialog(QDialog):
             "Tag notes 'omnia-autogen' so Omnia auto-generates the card"
         )
         self._autogen_check.setChecked(config.autogen)
+        self._plus_overlay_check = QCheckBox(
+            "Show a floating + on double-click / drag-select (needs Input Monitoring on macOS)"
+        )
+        self._plus_overlay_check.setChecked(config.plus_overlay)
 
         self._populate_decks_and_models()
         self._populate_fields(self._model_combo.currentText())
@@ -81,6 +85,7 @@ class SettingsDialog(QDialog):
         form.addRow("Capture hotkey", self._hotkey_edit)
         form.addRow("OCR hotkey", self._ocr_hotkey_edit)
         form.addRow(self._autogen_check)
+        form.addRow(self._plus_overlay_check)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -168,4 +173,5 @@ class SettingsDialog(QDialog):
             autogen=self._autogen_check.isChecked(),
             hotkey=self._hotkey_edit.text().strip(),
             ocr_hotkey=self._ocr_hotkey_edit.text().strip(),
+            plus_overlay=self._plus_overlay_check.isChecked(),
         )

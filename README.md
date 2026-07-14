@@ -10,11 +10,14 @@ speaks the **exact same AnkiConnect contract**, so the
 auto-generates the card with **no Anki-side change** (the add-on ships a matching
 `desktop_clipper` integration).
 
-Two ways to capture, both ending in a confirm popup → Anki:
+Three ways to capture, all ending in a confirm popup → Anki:
 
-1. **Selection (hotkey):** select text in any app, press the global hotkey → a popup shows the
+1. **Floating "+" (double-click / drag-select):** select a word or phrase in any app and a small
+   **"+"** appears near the cursor — click it → the popup opens. Like the web clipper's "+", but a
+   real OS overlay that works over any app. On by default; toggle in Settings.
+2. **Selection (hotkey):** select text in any app, press the global hotkey → a popup shows the
    **Word** + its **Context** (the surrounding sentence) → **Add**.
-2. **OCR (hotkey):** press the OCR hotkey, **drag a rectangle** over anything on screen
+3. **OCR (hotkey):** press the OCR hotkey, **drag a rectangle** over anything on screen
    (a scanned PDF, an image, a locked app) → the text is recognised on the CPU → same popup → **Add**.
 
 This folder is a **front-end client only**. It talks to Anki over HTTP through the
@@ -104,8 +107,8 @@ Settings are stored as JSON in your OS config directory:
 
 **Settings** offers the same choices as the web-clipper options: **Deck**, **Note type**, and the
 **Word/Context → field** map are **dropdowns populated live from AnkiConnect** (they fall back to
-editable text if Anki isn't running), plus source tag, both hotkeys, autogen, and the AnkiConnect
-URL/key.
+editable text if Anki isn't running), plus source tag, both hotkeys, autogen, the **floating "+"**
+toggle, and the AnkiConnect URL/key.
 
 ---
 
@@ -173,7 +176,8 @@ Grant the app (or your terminal / Python) these, then restart it:
 
 - **Privacy & Security → Accessibility** — synthesise Cmd+C, receive the global hotkey, and read
   the focused text for *context*.
-- **Privacy & Security → Input Monitoring** — the global hotkey listener.
+- **Privacy & Security → Input Monitoring** — the global hotkey listener **and the mouse hook
+  behind the floating "+"** (double-click / drag-select detection).
 - **Privacy & Security → Screen Recording** — required for the **OCR** screen grab.
 
 ### Windows
@@ -211,7 +215,8 @@ original clipboard. For text you can't select, use the **OCR** path.
 
 The **pure** modules — `config.py`, `anki.py`, `capture/base.py`, `capture/context.py` (the
 `sentence_around` helper + the fallback provider), `capture/ocr.py` (`RegionOcrCapture` +
-`boxes_to_reading_order`), and the injectable core of `capture/clipboard.py` — import **no
+`boxes_to_reading_order`), `capture/gesture.py` (the double-click / drag-select detector),
+`mouse_watcher.py`, and the injectable core of `capture/clipboard.py` — import **no
 PyQt6/pynput/rapidocr/pyobjc at module load**, so their tests run headless in a plain virtualenv.
 The heavy deps are imported lazily inside the backends and only exercised at runtime; the UI /
 hotkey / overlay modules import PyQt6 at the top and are not imported during test collection.
@@ -231,14 +236,17 @@ omnia-desktop-clipper/
 │   ├── anki.py            # AnkiConnectClient: addNote + deck/model/field lists  (PURE)
 │   ├── platform.py        # config_dir() (pure) + cursor_pos() (lazy Qt)
 │   ├── hotkey.py          # GlobalHotkey (pynput, runtime only)
+│   ├── mouse_watcher.py   # GlobalMouseWatcher: mouse hook -> gesture -> "+"  (pynput, runtime)
 │   ├── capture/
 │   │   ├── base.py        # SelectionCapture ABC  (PURE)
 │   │   ├── clipboard.py   # ClipboardCapture (injectable core + Qt/pynput backends)
 │   │   ├── context.py     # ContextProvider: macOS Accessibility + fallback  (PURE core)
+│   │   ├── gesture.py     # SelectionGestureDetector: double-click / drag-select  (PURE)
 │   │   └── ocr.py         # OcrEngine/RapidOcrEngine + RegionOcrCapture  (PURE core)
 │   └── ui/
 │       ├── tray.py            # QSystemTrayIcon + menu
 │       ├── popup.py           # CapturePopup (word + context near the cursor)
+│       ├── plus_overlay.py    # PlusOverlay: floating "+" near the cursor
 │       ├── settings.py        # SettingsDialog (AnkiConnect-backed dropdowns)
 │       └── region_overlay.py  # drag-select overlay + screen-region grab (OCR)
 ├── tests/                 # headless: config / anki / clipboard / context / ocr
@@ -248,8 +256,9 @@ omnia-desktop-clipper/
 
 ### Roadmap
 
-Done: hotkey + clipboard selection, **context** via macOS Accessibility (fallback elsewhere),
-**CPU OCR** screen capture, AnkiConnect-backed settings, the dedicated add-on integration, and
-**PyInstaller packaging** (`build.py`). Next: a floating **"+"** overlay on double-click/drag
-(global mouse hook), and Windows UIA / Linux X11 context backends.
+Done: hotkey + clipboard selection, the floating **"+"** overlay on double-click/drag (global
+mouse hook), **context** via macOS Accessibility (fallback elsewhere), **CPU OCR** screen capture,
+AnkiConnect-backed settings, the dedicated add-on integration, and **PyInstaller packaging**
+(`build.py`). Next: Windows UIA / Linux X11 context backends, and only showing the "+" when text
+is actually selected (currently it shows on any double-click / drag).
 ```
