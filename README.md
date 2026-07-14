@@ -3,10 +3,12 @@
 A small **standalone desktop app** (macOS / Windows / Ubuntu) that lets you capture a
 **word (or phrase) + its context** from *any* application — PDF viewers, Word, editors,
 terminals, even non-selectable text via **OCR** — and send it straight into your running Anki
-as a new note. It is the desktop sibling of the [Omnia Web Clipper](../omnia-web-clipper/)
-browser extension and speaks the **exact same AnkiConnect contract**, so the
-[Omnia](../../README.md) add-on's **Smart Notes / integration gateway** auto-generates the card
-with **no Anki-side change** (the add-on ships a matching `desktop_clipper` integration).
+as a new note. It is the desktop sibling of the
+[Omnia Web Clipper](https://github.com/osirisQdt2810/omnia-web-clipper) browser extension and
+speaks the **exact same AnkiConnect contract**, so the
+[Omnia](https://github.com/osirisQdt2810/omnia) add-on's **Smart Notes / integration gateway**
+auto-generates the card with **no Anki-side change** (the add-on ships a matching
+`desktop_clipper` integration).
 
 Two ways to capture, both ending in a confirm popup → Anki:
 
@@ -154,8 +156,9 @@ a clipped note is tagged:
 ["omnia-desktop-clipper", "omnia-autogen"]
 ```
 
-Enable auto-generation for it in Anki under **Omnia → Smart Notes → Integrations** (toggle *Omnia
-Desktop Clipper*). The source tag is configurable in Settings (e.g. set it to `omnia-web-clipper`
+Enable auto-generation for it in Anki under **Tools → Omnia** → the **Smart Notes** plugin's
+**Configure** → **Integrations** tab (toggle *Omnia Desktop Clipper*). The source tag is
+configurable in Settings (e.g. set it to `omnia-web-clipper`
 to share the browser clipper's toggle).
 
 ---
@@ -243,7 +246,7 @@ omnia-desktop-clipper/
 └── pyproject.toml
 ```
 
-### Roadmap (see ADR-007)
+### Roadmap
 
 Done: hotkey + clipboard selection, **context** via macOS Accessibility (fallback elsewhere),
 **CPU OCR** screen capture, AnkiConnect-backed settings, the dedicated add-on integration, and
