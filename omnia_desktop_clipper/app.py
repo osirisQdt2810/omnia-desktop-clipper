@@ -136,22 +136,20 @@ class ClipperApp(QObject):
         self._sync_listeners()
 
     def _sync_listeners(self) -> None:
-        """Start/stop the hotkeys + "+" mouse hook to match ``enabled`` (and ``plus_overlay``).
+        """Ensure the keyboard hotkeys are running and (re)start/stop the "+" mouse hook per config.
 
-        The master switch: when disabled, every input hook is stopped (nothing can capture); when
-        enabled, the hotkeys run and the mouse hook runs only if the "+" is on. All start()/stop()
-        calls are idempotent, so this is safe to call on startup and on any config/toggle change.
+        The keyboard hotkey listeners are started ONCE and never stopped/restarted while the app
+        runs. pynput's macOS keyboard listener touches the **main-thread-only** Text Input Source
+        manager (``TSMGetInputSourceProperty``) from its own thread; restarting it once the Qt run
+        loop is live trips ``dispatch_assert_queue`` and **SIGTRAPs the app** (the crash seen when
+        toggling Enabled). Leaving them running is harmless — the capture handlers early-return when
+        disabled. The "+" mouse hook has no such constraint, so it starts/stops freely.
         """
-        if self._config.enabled:
-            self._hotkey.start()
-            self._ocr_hotkey.start()
-            if self._config.plus_overlay:
-                self._mouse_watcher.start()
-            else:
-                self._mouse_watcher.stop()
+        self._hotkey.start()  # idempotent: starts once, no-op afterwards; never stopped here
+        self._ocr_hotkey.start()
+        if self._config.enabled and self._config.plus_overlay:
+            self._mouse_watcher.start()
         else:
-            self._hotkey.stop()
-            self._ocr_hotkey.stop()
             self._mouse_watcher.stop()
             self._plus_overlay.hide()
 
@@ -249,21 +247,21 @@ class ClipperApp(QObject):
             new_config.ankiconnect_url != self._config.ankiconnect_url
             or new_config.api_key != self._config.api_key
         )
-        hotkey_changed = new_config.hotkey != self._config.hotkey
-        ocr_hotkey_changed = new_config.ocr_hotkey != self._config.ocr_hotkey
+        hotkey_changed = (
+            new_config.hotkey != self._config.hotkey
+            or new_config.ocr_hotkey != self._config.ocr_hotkey
+        )
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
-        # Recreate a hotkey object when its string changes (stop the old one); _sync_listeners
-        # then (re)starts everything to match `enabled` + `plus_overlay`.
-        if hotkey_changed:
-            self._hotkey.stop()
-            self._hotkey = GlobalHotkey(new_config.hotkey, self._on_hotkey)
-        if ocr_hotkey_changed:
-            self._ocr_hotkey.stop()
-            self._ocr_hotkey = GlobalHotkey(new_config.ocr_hotkey, self._on_ocr_hotkey)
+        # NB: we do NOT restart the keyboard hotkey listeners here — that would SIGTRAP (see
+        # _sync_listeners). A changed hotkey string is saved and applies on the next app launch.
         self._sync_listeners()
         self._tray.set_enabled(new_config.enabled)  # keep the tray checkbox in sync with Settings
+        if hotkey_changed:
+            self._tray.show_message(
+                _TOAST_TITLE, "Hotkey change saved — reopen the app to apply it."
+            )
 
     def _on_toggle_enabled(self, enabled: bool) -> None:
         """Tray "Enabled" quick-toggle: persist the master switch and start/stop the input hooks."""
