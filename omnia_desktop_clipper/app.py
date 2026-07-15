@@ -107,6 +107,8 @@ class ClipperApp(QObject):
         self._ocr = RegionOcrCapture(RapidOcrEngine(), grab_region)
         self._tray = ClipperTray(
             icon=self._icon(),
+            enabled=self._config.enabled,
+            on_toggle_enabled=self._on_toggle_enabled,
             on_capture=self.capture_and_add,
             on_ocr=self.capture_ocr_and_add,
             on_settings=self.open_settings,
@@ -127,17 +129,36 @@ class ClipperApp(QObject):
         self._app.aboutToQuit.connect(self._shutdown)
 
     def start(self) -> None:
-        """Show the tray icon and start the global hotkeys (+ the "+" mouse hook if enabled)."""
+        """Show the tray icon and start the listeners the current config calls for."""
         _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
         _request_macos_accessibility()  # register + prompt for Accessibility on macOS
         self._tray.show()
-        self._hotkey.start()
-        self._ocr_hotkey.start()
-        if self._config.plus_overlay:
-            self._mouse_watcher.start()
+        self._sync_listeners()
+
+    def _sync_listeners(self) -> None:
+        """Start/stop the hotkeys + "+" mouse hook to match ``enabled`` (and ``plus_overlay``).
+
+        The master switch: when disabled, every input hook is stopped (nothing can capture); when
+        enabled, the hotkeys run and the mouse hook runs only if the "+" is on. All start()/stop()
+        calls are idempotent, so this is safe to call on startup and on any config/toggle change.
+        """
+        if self._config.enabled:
+            self._hotkey.start()
+            self._ocr_hotkey.start()
+            if self._config.plus_overlay:
+                self._mouse_watcher.start()
+            else:
+                self._mouse_watcher.stop()
+        else:
+            self._hotkey.stop()
+            self._ocr_hotkey.stop()
+            self._mouse_watcher.stop()
+            self._plus_overlay.hide()
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
+        if not self._config.enabled:  # master switch off (also covers the tray "Capture now")
+            return
         try:
             selection = self._capture.capture()
         except Exception as exc:  # capture must never crash the app (mirror the OCR path)
@@ -159,6 +180,8 @@ class ClipperApp(QObject):
 
     def capture_ocr_and_add(self) -> None:
         """Drag-select a screen region, OCR it, confirm, and add the note."""
+        if not self._config.enabled:  # master switch off (also covers the tray OCR item)
+            return
         region = RegionSelectOverlay().select_region()
         if region is None:
             return
@@ -228,24 +251,27 @@ class ClipperApp(QObject):
         )
         hotkey_changed = new_config.hotkey != self._config.hotkey
         ocr_hotkey_changed = new_config.ocr_hotkey != self._config.ocr_hotkey
-        plus_changed = new_config.plus_overlay != self._config.plus_overlay
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
+        # Recreate a hotkey object when its string changes (stop the old one); _sync_listeners
+        # then (re)starts everything to match `enabled` + `plus_overlay`.
         if hotkey_changed:
             self._hotkey.stop()
             self._hotkey = GlobalHotkey(new_config.hotkey, self._on_hotkey)
-            self._hotkey.start()
         if ocr_hotkey_changed:
             self._ocr_hotkey.stop()
             self._ocr_hotkey = GlobalHotkey(new_config.ocr_hotkey, self._on_ocr_hotkey)
-            self._ocr_hotkey.start()
-        if plus_changed:
-            if new_config.plus_overlay:
-                self._mouse_watcher.start()
-            else:
-                self._mouse_watcher.stop()
-                self._plus_overlay.hide()
+        self._sync_listeners()
+        self._tray.set_enabled(new_config.enabled)  # keep the tray checkbox in sync with Settings
+
+    def _on_toggle_enabled(self, enabled: bool) -> None:
+        """Tray "Enabled" quick-toggle: persist the master switch and start/stop the input hooks."""
+        if enabled == self._config.enabled:
+            return
+        self._config.enabled = enabled
+        config_module.save(self._config)
+        self._sync_listeners()
 
     def _on_hotkey(self) -> None:
         """Capture-hotkey callback (worker thread): hop to the Qt main thread."""
@@ -275,6 +301,8 @@ class ClipperApp(QObject):
         which only delays the "+" by the copy's settle time; the source app (a separate process)
         is not blocked.
         """
+        if not self._config.enabled:  # master switch off
+            return
         try:
             selection = self._capture.capture()
         except Exception:  # capture backend / permission error: best-effort, show nothing

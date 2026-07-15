@@ -74,9 +74,12 @@ pip install -r requirements.txt
 python -m omnia_desktop_clipper
 ```
 
-The app lives in the **system tray / menu bar** (no main window). Its menu: **Capture now**,
-**Capture text from screen (OCR)…**, **Settings…**, **Quit**. Default hotkeys: **⌘⇧A / Ctrl+Shift+A**
-(selection) and **⌘⇧O / Ctrl+Shift+O** (OCR) — change them in Settings.
+The app lives in the **system tray / menu bar** (no main window). Its menu: a checkable
+**Enabled** master switch, **Capture now**, **Capture text from screen (OCR)…**, **Settings…**,
+**Quit**. When **Enabled** is off, everything is dormant — the hotkeys and the "+" mouse hook are
+stopped and nothing captures — a one-click way to pause the clipper without quitting it (also
+toggleable in Settings). Default hotkeys: **⌘⇧A / Ctrl+Shift+A** (selection) and
+**⌘⇧O / Ctrl+Shift+O** (OCR) — change them in Settings.
 
 ### Build a double-click app (no Python for end users)
 
@@ -118,7 +121,7 @@ Settings are stored as JSON in your OS config directory:
 
 **Settings** offers the same choices as the web-clipper options: **Deck**, **Note type**, and the
 **Word/Context → field** map are **dropdowns populated live from AnkiConnect** (they fall back to
-editable text if Anki isn't running), plus source tag, both hotkeys, autogen, the **floating "+"**
+editable text if Anki isn't running), plus the **Enabled** master switch, source tag, both hotkeys, autogen, the **floating "+"**
 toggle, and the AnkiConnect URL/key.
 
 ---
