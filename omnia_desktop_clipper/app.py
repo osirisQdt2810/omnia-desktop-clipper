@@ -57,6 +57,28 @@ def _warm_macos_trust_cache() -> None:
         pass
 
 
+def _request_macos_accessibility() -> None:
+    """On macOS, register this app for Accessibility and prompt to grant it (once).
+
+    The floating "+" mouse hook and the copy-capture need **Accessibility** (pynput gates on
+    ``AXIsProcessTrusted``) on top of Input Monitoring. Calling ``AXIsProcessTrustedWithOptions``
+    with the prompt option makes the app appear under Privacy & Security → Accessibility and shows
+    the grant dialog on first launch (a silent no-op once granted). Input Monitoring is then
+    prompted automatically when pynput creates its event tap. Best-effort; no-op elsewhere.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+
+        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+    except Exception:
+        pass
+
+
 class ClipperApp(QObject):
     """The application controller: owns config and the wired components."""
 
@@ -107,6 +129,7 @@ class ClipperApp(QObject):
     def start(self) -> None:
         """Show the tray icon and start the global hotkeys (+ the "+" mouse hook if enabled)."""
         _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
+        _request_macos_accessibility()  # register + prompt for Accessibility on macOS
         self._tray.show()
         self._hotkey.start()
         self._ocr_hotkey.start()

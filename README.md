@@ -97,6 +97,12 @@ Output in `dist/`: `Omnia Desktop Clipper.app` (macOS) · `Omnia Desktop Clipper
 a Linux binary/folder (wrap into an AppImage separately). `build.py` bundles the RapidOCR / ONNX
 Runtime models + native libs (`--collect-all`) so OCR works in the frozen app.
 
+**macOS: the build also installs into `/Applications`** (fallback `~/Applications`) so you can
+launch it from Launchpad / Spotlight instead of digging into `dist/`. Pass `python build.py
+--no-install` to skip. Because the `.app` is **unsigned**, macOS treats each rebuild as a new app
+and **resets its permissions** — after a rebuild, re-grant Accessibility + Input Monitoring (below),
+or just run from source (`python -m omnia_desktop_clipper`), which keeps the Terminal's grant.
+
 Settings are stored as JSON in your OS config directory:
 
 | OS      | Path                                                            |
@@ -172,13 +178,20 @@ Synthesising a copy keystroke, listening for a global hotkey, and reading the fo
 privileged operations.
 
 ### macOS
-Grant the app (or your terminal / Python) these, then restart it:
+On first launch the app prompts for **Accessibility** (and registers itself in the list); grant it,
+then grant the rest below and **fully quit + reopen** the app. The floating **"+"** needs **BOTH
+Accessibility AND Input Monitoring** — with only one it won't appear.
 
-- **Privacy & Security → Accessibility** — synthesise Cmd+C, receive the global hotkey, and read
-  the focused text for *context*.
-- **Privacy & Security → Input Monitoring** — the global hotkey listener **and the mouse hook
-  behind the floating "+"** (double-click / drag-select detection).
+- **Privacy & Security → Accessibility** — the mouse hook behind the floating "+", synthesising
+  Cmd+C, receiving the global hotkey, and reading the focused text for *context*. (pynput gates its
+  listeners on this.)
+- **Privacy & Security → Input Monitoring** — the global hotkey listener and the "+" mouse hook.
 - **Privacy & Security → Screen Recording** — required for the **OCR** screen grab.
+
+> Unsigned `.app` gotcha: after `python build.py` rebuilds the app, macOS sees a *new* app and
+> **drops these grants**. Re-grant them (in each list, remove the old "Omnia Desktop Clipper" entry
+> with **–**, then re-add the current `.app`), or run from source — `python -m omnia_desktop_clipper`
+> — which reuses the Terminal's grants across rebuilds.
 
 ### Windows
 No special permission is normally required. Apps running **as administrator** won't receive
