@@ -188,10 +188,21 @@ Accessibility AND Input Monitoring** — with only one it won't appear.
 - **Privacy & Security → Input Monitoring** — the global hotkey listener and the "+" mouse hook.
 - **Privacy & Security → Screen Recording** — required for the **OCR** screen grab.
 
-> Unsigned `.app` gotcha: after `python build.py` rebuilds the app, macOS sees a *new* app and
-> **drops these grants**. Re-grant them (in each list, remove the old "Omnia Desktop Clipper" entry
-> with **–**, then re-add the current `.app`), or run from source — `python -m omnia_desktop_clipper`
-> — which reuses the Terminal's grants across rebuilds.
+> Unsigned `.app` gotcha: because the app is only **ad-hoc signed**, macOS TCC is unreliable with
+> it — a granted Accessibility/Input-Monitoring toggle may not actually take effect (the prompt
+> keeps re-appearing and the "+" never shows), and every `python build.py` rebuild resets the
+> grants. If a grant won't stick, reset TCC for the app and re-grant fresh:
+> ```bash
+> tccutil reset Accessibility com.omnia.desktopclipper
+> tccutil reset ListenEvent   com.omnia.desktopclipper   # Input Monitoring
+> ```
+> then quit + relaunch and grant both when prompted.
+>
+> **Most reliable double-click on macOS: `run.command`** (in this folder). Double-click it — it runs
+> the app from source under **Terminal**, which keeps its Accessibility + Input Monitoring grants
+> across every code change and rebuild (grant Terminal once in Privacy & Security). A Terminal
+> window stays open while the app runs; closing it quits the app. This sidesteps the ad-hoc-`.app`
+> TCC problem entirely.
 
 ### Windows
 No special permission is normally required. Apps running **as administrator** won't receive
