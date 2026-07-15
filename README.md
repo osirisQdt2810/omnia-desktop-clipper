@@ -99,9 +99,14 @@ Runtime models + native libs (`--collect-all`) so OCR works in the frozen app.
 
 **macOS: the build also installs into `/Applications`** (fallback `~/Applications`) so you can
 launch it from Launchpad / Spotlight instead of digging into `dist/`. Pass `python build.py
---no-install` to skip. Because the `.app` is **unsigned**, macOS treats each rebuild as a new app
-and **resets its permissions** — after a rebuild, re-grant Accessibility + Input Monitoring (below),
-or just run from source (`python -m omnia_desktop_clipper`), which keeps the Terminal's grant.
+--no-install` to skip.
+
+**Permissions persist across rebuilds** because `build.py` re-signs the `.app` with a *stable*
+designated requirement (`identifier "com.omnia.desktopclipper"`). Without this, PyInstaller's
+default cdhash-based signature changes every build and macOS TCC drops the Accessibility / Input
+Monitoring grant on each rebuild (the "+" then silently dies). With it, you grant the two
+permissions **once** and every later `python build.py` + double-click just works. See *Per-OS
+permissions → macOS* for the one-time grant (and the one-time cleanup if you built before this).
 
 Settings are stored as JSON in your OS config directory:
 
@@ -188,21 +193,21 @@ Accessibility AND Input Monitoring** — with only one it won't appear.
 - **Privacy & Security → Input Monitoring** — the global hotkey listener and the "+" mouse hook.
 - **Privacy & Security → Screen Recording** — required for the **OCR** screen grab.
 
-> Unsigned `.app` gotcha: because the app is only **ad-hoc signed**, macOS TCC is unreliable with
-> it — a granted Accessibility/Input-Monitoring toggle may not actually take effect (the prompt
-> keeps re-appearing and the "+" never shows), and every `python build.py` rebuild resets the
-> grants. If a grant won't stick, reset TCC for the app and re-grant fresh:
-> ```bash
-> tccutil reset Accessibility com.omnia.desktopclipper
-> tccutil reset ListenEvent   com.omnia.desktopclipper   # Input Monitoring
-> ```
-> then quit + relaunch and grant both when prompted.
->
-> **Most reliable double-click on macOS: `run.command`** (in this folder). Double-click it — it runs
-> the app from source under **Terminal**, which keeps its Accessibility + Input Monitoring grants
-> across every code change and rebuild (grant Terminal once in Privacy & Security). A Terminal
-> window stays open while the app runs; closing it quits the app. This sidesteps the ad-hoc-`.app`
-> TCC problem entirely.
+**One-time cleanup if you built the app BEFORE this signing fix** (your existing grant is pinned to
+an old build's cdhash and won't match): in **both** the Accessibility and Input Monitoring lists,
+select the old "Omnia Desktop Clipper" entry, press **–** to remove it, then re-add the current
+`/Applications/Omnia Desktop Clipper.app` with **+** (or just grant when the app re-prompts). This
+records the new **identifier**-based requirement — after which grants **persist across every
+rebuild**, so you never need to redo it.
+
+> How to tell it's the stale-grant problem: the app keeps re-prompting for Accessibility even
+> though the toggle looks ON, and the "+" never appears. That means macOS granted an *old* build's
+> exact binary; removing + re-adding re-records the grant against the stable identifier `build.py`
+> now signs with.
+
+> Prefer not to bother with the `.app` at all? Double-click **`run.command`** (in this folder): it
+> runs the app from source under Terminal, which keeps its grants across every change — grant
+> Terminal once in Privacy & Security. (A Terminal window stays open while the app runs.)
 
 ### Windows
 No special permission is normally required. Apps running **as administrator** won't receive

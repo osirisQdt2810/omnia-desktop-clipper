@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Omnia Desktop Clipper"
+BUNDLE_ID = "com.omnia.desktopclipper"
 
 
 def build_args() -> list[str]:
@@ -50,6 +51,45 @@ def build_args() -> list[str]:
         args += ["--osx-bundle-identifier", "com.omnia.desktopclipper"]
     args += ["run_desktop_clipper.py"]
     return args
+
+
+def sign_app(app_path: Path) -> None:
+    """Re-sign the macOS ``.app`` so its code requirement is the STABLE bundle identifier.
+
+    Why this matters (the reason a rebuilt app "loses" its permissions): PyInstaller ad-hoc-signs
+    the app with a **cdhash**-based designated requirement, and the cdhash **changes on every
+    build**. macOS TCC pins an Accessibility / Input-Monitoring grant to the app's requirement AT
+    GRANT TIME, so after the next rebuild the running app's cdhash no longer matches the granted
+    requirement — the grant is silently ignored, ``AXIsProcessTrusted`` returns False, pynput's
+    listener bails, and the floating "+" never appears. Re-signing so the *designated requirement*
+    is ``identifier "com.omnia.desktopclipper"`` (stable) makes TCC keep the grant across rebuilds:
+    grant Accessibility + Input Monitoring **once**, then it's just build + double-click.
+
+    Security note: an identifier-only requirement is weaker than cdhash/certificate pinning — any
+    app ad-hoc-signed with the same bundle id would satisfy the same grant. That's an acceptable
+    trade-off for a personal, locally-built tool. For cryptographic pinning instead, sign with a
+    self-signed code-signing certificate (see the README).
+    """
+    if not app_path.is_dir():
+        return
+    try:
+        subprocess.check_call(
+            [
+                "codesign",
+                "--force",
+                "--deep",
+                "--sign",
+                "-",  # ad-hoc
+                "--identifier",
+                BUNDLE_ID,
+                "--requirements",
+                f'=designated => identifier "{BUNDLE_ID}"',
+                str(app_path),
+            ]
+        )
+        print(f"Signed {app_path.name} with a stable identifier requirement ({BUNDLE_ID}).")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print(f"Warning: could not re-sign the app ({exc}); permissions may reset each rebuild.")
 
 
 def install_app() -> Path | None:
@@ -85,8 +125,12 @@ def install_app() -> Path | None:
 def main() -> int:
     """Run PyInstaller; on macOS, also install the .app into /Applications (unless --no-install)."""
     rc = subprocess.call(build_args())
-    if rc == 0 and sys.platform == "darwin" and "--no-install" not in sys.argv:
-        install_app()
+    if rc == 0 and sys.platform == "darwin":
+        # Re-sign with a stable identifier requirement BEFORE installing, so the copy in
+        # /Applications carries it too — this is what keeps TCC grants across rebuilds.
+        sign_app(Path("dist") / f"{APP_NAME}.app")
+        if "--no-install" not in sys.argv:
+            install_app()
     return rc
 
 
