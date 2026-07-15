@@ -95,6 +95,9 @@ class Config:
     # Show a floating "+" near the cursor on a double-click / drag-select in any app; clicking it
     # runs the same capture as the hotkey. A global mouse hook (needs Input Monitoring on macOS).
     plus_overlay: bool = True
+    # Master on/off switch. When off, NOTHING captures — the hotkeys and the "+" mouse hook are
+    # stopped and the tray/capture actions no-op. Toggle it in Settings or the tray menu.
+    enabled: bool = True
 
     def tags(self) -> list[str]:
         """Return the note tags: the source tag + ``omnia-autogen`` if enabled."""
@@ -136,6 +139,7 @@ class Config:
             hotkey=_as_str(data.get("hotkey"), base.hotkey),
             ocr_hotkey=_as_str(data.get("ocr_hotkey"), base.ocr_hotkey),
             plus_overlay=_as_bool(data.get("plus_overlay"), base.plus_overlay),
+            enabled=_as_bool(data.get("enabled"), base.enabled),
         )
 
 

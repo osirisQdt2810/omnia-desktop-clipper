@@ -74,9 +74,12 @@ pip install -r requirements.txt
 python -m omnia_desktop_clipper
 ```
 
-The app lives in the **system tray / menu bar** (no main window). Its menu: **Capture now**,
-**Capture text from screen (OCR)…**, **Settings…**, **Quit**. Default hotkeys: **⌘⇧A / Ctrl+Shift+A**
-(selection) and **⌘⇧O / Ctrl+Shift+O** (OCR) — change them in Settings.
+The app lives in the **system tray / menu bar** (no main window). Its menu: a checkable
+**Enabled** master switch, **Capture now**, **Capture text from screen (OCR)…**, **Settings…**,
+**Quit**. When **Enabled** is off, everything is dormant — the hotkeys and the "+" mouse hook are
+stopped and nothing captures — a one-click way to pause the clipper without quitting it (also
+toggleable in Settings). Default hotkeys: **⌘⇧A / Ctrl+Shift+A** (selection) and
+**⌘⇧O / Ctrl+Shift+O** (OCR) — change them in Settings.
 
 ### Build a double-click app (no Python for end users)
 
@@ -97,6 +100,17 @@ Output in `dist/`: `Omnia Desktop Clipper.app` (macOS) · `Omnia Desktop Clipper
 a Linux binary/folder (wrap into an AppImage separately). `build.py` bundles the RapidOCR / ONNX
 Runtime models + native libs (`--collect-all`) so OCR works in the frozen app.
 
+**macOS: the build also installs into `/Applications`** (fallback `~/Applications`) so you can
+launch it from Launchpad / Spotlight instead of digging into `dist/`. Pass `python build.py
+--no-install` to skip.
+
+**Permissions persist across rebuilds** because `build.py` re-signs the `.app` with a *stable*
+designated requirement (`identifier "com.omnia.desktopclipper"`). Without this, PyInstaller's
+default cdhash-based signature changes every build and macOS TCC drops the Accessibility / Input
+Monitoring grant on each rebuild (the "+" then silently dies). With it, you grant the two
+permissions **once** and every later `python build.py` + double-click just works. See *Per-OS
+permissions → macOS* for the one-time grant (and the one-time cleanup if you built before this).
+
 Settings are stored as JSON in your OS config directory:
 
 | OS      | Path                                                            |
@@ -107,7 +121,7 @@ Settings are stored as JSON in your OS config directory:
 
 **Settings** offers the same choices as the web-clipper options: **Deck**, **Note type**, and the
 **Word/Context → field** map are **dropdowns populated live from AnkiConnect** (they fall back to
-editable text if Anki isn't running), plus source tag, both hotkeys, autogen, the **floating "+"**
+editable text if Anki isn't running), plus the **Enabled** master switch, source tag, both hotkeys, autogen, the **floating "+"**
 toggle, and the AnkiConnect URL/key.
 
 ---
@@ -172,13 +186,31 @@ Synthesising a copy keystroke, listening for a global hotkey, and reading the fo
 privileged operations.
 
 ### macOS
-Grant the app (or your terminal / Python) these, then restart it:
+On first launch the app prompts for **Accessibility** (and registers itself in the list); grant it,
+then grant the rest below and **fully quit + reopen** the app. The floating **"+"** needs **BOTH
+Accessibility AND Input Monitoring** — with only one it won't appear.
 
-- **Privacy & Security → Accessibility** — synthesise Cmd+C, receive the global hotkey, and read
-  the focused text for *context*.
-- **Privacy & Security → Input Monitoring** — the global hotkey listener **and the mouse hook
-  behind the floating "+"** (double-click / drag-select detection).
+- **Privacy & Security → Accessibility** — the mouse hook behind the floating "+", synthesising
+  Cmd+C, receiving the global hotkey, and reading the focused text for *context*. (pynput gates its
+  listeners on this.)
+- **Privacy & Security → Input Monitoring** — the global hotkey listener and the "+" mouse hook.
 - **Privacy & Security → Screen Recording** — required for the **OCR** screen grab.
+
+**One-time cleanup if you built the app BEFORE this signing fix** (your existing grant is pinned to
+an old build's cdhash and won't match): in **both** the Accessibility and Input Monitoring lists,
+select the old "Omnia Desktop Clipper" entry, press **–** to remove it, then re-add the current
+`/Applications/Omnia Desktop Clipper.app` with **+** (or just grant when the app re-prompts). This
+records the new **identifier**-based requirement — after which grants **persist across every
+rebuild**, so you never need to redo it.
+
+> How to tell it's the stale-grant problem: the app keeps re-prompting for Accessibility even
+> though the toggle looks ON, and the "+" never appears. That means macOS granted an *old* build's
+> exact binary; removing + re-adding re-records the grant against the stable identifier `build.py`
+> now signs with.
+
+> Prefer not to bother with the `.app` at all? Double-click **`run.command`** (in this folder): it
+> runs the app from source under Terminal, which keeps its grants across every change — grant
+> Terminal once in Privacy & Security. (A Terminal window stays open while the app runs.)
 
 ### Windows
 No special permission is normally required. Apps running **as administrator** won't receive

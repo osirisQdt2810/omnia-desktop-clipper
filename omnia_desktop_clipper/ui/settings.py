@@ -68,6 +68,10 @@ class SettingsDialog(QDialog):
             "Show a floating + on double-click / drag-select (needs Input Monitoring on macOS)"
         )
         self._plus_overlay_check.setChecked(config.plus_overlay)
+        self._enabled_check = QCheckBox(
+            "Enable the clipper (master switch: hotkeys + floating +). Off = capture nothing."
+        )
+        self._enabled_check.setChecked(config.enabled)
 
         self._populate_decks_and_models()
         self._populate_fields(self._model_combo.currentText())
@@ -75,6 +79,7 @@ class SettingsDialog(QDialog):
         self._model_combo.currentTextChanged.connect(self._populate_fields)
 
         form = QFormLayout(self)
+        form.addRow(self._enabled_check)  # master switch, on top
         form.addRow("AnkiConnect URL", self._url_edit)
         form.addRow("API key", self._key_edit)
         form.addRow("Deck", self._deck_combo)
@@ -174,4 +179,5 @@ class SettingsDialog(QDialog):
             hotkey=self._hotkey_edit.text().strip(),
             ocr_hotkey=self._ocr_hotkey_edit.text().strip(),
             plus_overlay=self._plus_overlay_check.isChecked(),
+            enabled=self._enabled_check.isChecked(),
         )

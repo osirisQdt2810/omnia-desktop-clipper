@@ -16,7 +16,7 @@ import sys
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication, QDialog, QStyle
+from PyQt6.QtWidgets import QApplication, QDialog
 
 from . import config as config_module
 from . import platform as platform_helpers
@@ -28,6 +28,7 @@ from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
 from .mouse_watcher import GlobalMouseWatcher
+from .ui.icon import plus_icon
 from .ui.plus_overlay import PlusOverlay
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
@@ -57,6 +58,28 @@ def _warm_macos_trust_cache() -> None:
         pass
 
 
+def _request_macos_accessibility() -> None:
+    """On macOS, register this app for Accessibility and prompt to grant it (once).
+
+    The floating "+" mouse hook and the copy-capture need **Accessibility** (pynput gates on
+    ``AXIsProcessTrusted``) on top of Input Monitoring. Calling ``AXIsProcessTrustedWithOptions``
+    with the prompt option makes the app appear under Privacy & Security → Accessibility and shows
+    the grant dialog on first launch (a silent no-op once granted). Input Monitoring is then
+    prompted automatically when pynput creates its event tap. Best-effort; no-op elsewhere.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+
+        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+    except Exception:
+        pass
+
+
 class ClipperApp(QObject):
     """The application controller: owns config and the wired components."""
 
@@ -76,6 +99,7 @@ class ClipperApp(QObject):
         """
         super().__init__()
         self._app = app
+        self._app.setWindowIcon(plus_icon())  # dock / window icon matches the tray + web clipper
         self._config: Config = config_module.load()
         self._client = self._build_client()
         self._capture: SelectionCapture = build_clipboard_capture(
@@ -85,6 +109,8 @@ class ClipperApp(QObject):
         self._ocr = RegionOcrCapture(RapidOcrEngine(), grab_region)
         self._tray = ClipperTray(
             icon=self._icon(),
+            enabled=self._config.enabled,
+            on_toggle_enabled=self._on_toggle_enabled,
             on_capture=self.capture_and_add,
             on_ocr=self.capture_ocr_and_add,
             on_settings=self.open_settings,
@@ -105,16 +131,34 @@ class ClipperApp(QObject):
         self._app.aboutToQuit.connect(self._shutdown)
 
     def start(self) -> None:
-        """Show the tray icon and start the global hotkeys (+ the "+" mouse hook if enabled)."""
+        """Show the tray icon and start the listeners the current config calls for."""
         _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
+        _request_macos_accessibility()  # register + prompt for Accessibility on macOS
         self._tray.show()
-        self._hotkey.start()
+        self._sync_listeners()
+
+    def _sync_listeners(self) -> None:
+        """Ensure the keyboard hotkeys are running and (re)start/stop the "+" mouse hook per config.
+
+        The keyboard hotkey listeners are started ONCE and never stopped/restarted while the app
+        runs. pynput's macOS keyboard listener touches the **main-thread-only** Text Input Source
+        manager (``TSMGetInputSourceProperty``) from its own thread; restarting it once the Qt run
+        loop is live trips ``dispatch_assert_queue`` and **SIGTRAPs the app** (the crash seen when
+        toggling Enabled). Leaving them running is harmless — the capture handlers early-return when
+        disabled. The "+" mouse hook has no such constraint, so it starts/stops freely.
+        """
+        self._hotkey.start()  # idempotent: starts once, no-op afterwards; never stopped here
         self._ocr_hotkey.start()
-        if self._config.plus_overlay:
+        if self._config.enabled and self._config.plus_overlay:
             self._mouse_watcher.start()
+        else:
+            self._mouse_watcher.stop()
+            self._plus_overlay.hide()
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
+        if not self._config.enabled:  # master switch off (also covers the tray "Capture now")
+            return
         try:
             selection = self._capture.capture()
         except Exception as exc:  # capture must never crash the app (mirror the OCR path)
@@ -136,6 +180,8 @@ class ClipperApp(QObject):
 
     def capture_ocr_and_add(self) -> None:
         """Drag-select a screen region, OCR it, confirm, and add the note."""
+        if not self._config.enabled:  # master switch off (also covers the tray OCR item)
+            return
         region = RegionSelectOverlay().select_region()
         if region is None:
             return
@@ -203,26 +249,29 @@ class ClipperApp(QObject):
             new_config.ankiconnect_url != self._config.ankiconnect_url
             or new_config.api_key != self._config.api_key
         )
-        hotkey_changed = new_config.hotkey != self._config.hotkey
-        ocr_hotkey_changed = new_config.ocr_hotkey != self._config.ocr_hotkey
-        plus_changed = new_config.plus_overlay != self._config.plus_overlay
+        hotkey_changed = (
+            new_config.hotkey != self._config.hotkey
+            or new_config.ocr_hotkey != self._config.ocr_hotkey
+        )
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
+        # NB: we do NOT restart the keyboard hotkey listeners here — that would SIGTRAP (see
+        # _sync_listeners). A changed hotkey string is saved and applies on the next app launch.
+        self._sync_listeners()
+        self._tray.set_enabled(new_config.enabled)  # keep the tray checkbox in sync with Settings
         if hotkey_changed:
-            self._hotkey.stop()
-            self._hotkey = GlobalHotkey(new_config.hotkey, self._on_hotkey)
-            self._hotkey.start()
-        if ocr_hotkey_changed:
-            self._ocr_hotkey.stop()
-            self._ocr_hotkey = GlobalHotkey(new_config.ocr_hotkey, self._on_ocr_hotkey)
-            self._ocr_hotkey.start()
-        if plus_changed:
-            if new_config.plus_overlay:
-                self._mouse_watcher.start()
-            else:
-                self._mouse_watcher.stop()
-                self._plus_overlay.hide()
+            self._tray.show_message(
+                _TOAST_TITLE, "Hotkey change saved — reopen the app to apply it."
+            )
+
+    def _on_toggle_enabled(self, enabled: bool) -> None:
+        """Tray "Enabled" quick-toggle: persist the master switch and start/stop the input hooks."""
+        if enabled == self._config.enabled:
+            return
+        self._config.enabled = enabled
+        config_module.save(self._config)
+        self._sync_listeners()
 
     def _on_hotkey(self) -> None:
         """Capture-hotkey callback (worker thread): hop to the Qt main thread."""
@@ -252,6 +301,8 @@ class ClipperApp(QObject):
         which only delays the "+" by the copy's settle time; the source app (a separate process)
         is not blocked.
         """
+        if not self._config.enabled:  # master switch off
+            return
         try:
             selection = self._capture.capture()
         except Exception:  # capture backend / permission error: best-effort, show nothing
@@ -288,8 +339,5 @@ class ClipperApp(QObject):
             return None
 
     def _icon(self) -> QIcon:
-        """Return a stock icon for the tray (a placeholder until artwork ships)."""
-        style = self._app.style()
-        if style is None:  # pragma: no cover - a QApplication always has a style
-            return QIcon()
-        return style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        """Return the Omnia clipper icon (blue "+" mark, matching the web clipper)."""
+        return plus_icon()

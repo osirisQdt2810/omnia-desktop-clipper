@@ -27,6 +27,7 @@ class TestConfigDefaults:
         assert config.autogen is True
         assert config.ocr_hotkey  # platform-specific, but always set
         assert config.plus_overlay is True  # the floating "+" is on by default
+        assert config.enabled is True  # the clipper is on by default
 
     def test_tags_include_source_and_autogen_when_enabled(self) -> None:
         config = Config(source_tag="omnia-desktop-clipper", autogen=True)
@@ -59,6 +60,7 @@ class TestConfigDefaults:
         assert loaded.source_tag == "omnia-web-clipper"  # preserved
         assert loaded.ocr_hotkey  # filled from the default
         assert loaded.plus_overlay is True  # new field defaults on for old configs
+        assert loaded.enabled is True  # master switch defaults on for old configs
 
 
 class TestConfigRoundTrip:
@@ -76,6 +78,7 @@ class TestConfigRoundTrip:
             autogen=False,
             hotkey="<ctrl>+<alt>+z",
             plus_overlay=False,
+            enabled=False,
         )
         save(original, path)
         assert path.exists()
