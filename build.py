@@ -27,7 +27,40 @@ APP_NAME = "Omnia Desktop Clipper"
 BUNDLE_ID = "com.omnia.desktopclipper"
 
 
-def build_args() -> list[str]:
+def make_icns() -> Path | None:
+    """Render the app's blue-"+" mark to an ``.icns`` (macOS) so the bundle icon matches the tray.
+
+    Uses the same painted icon as the running app (``ui.icon.plus_pixmap``) → an ``.iconset`` →
+    ``iconutil``. Best-effort: on any failure the app just builds with PyInstaller's default icon.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import os
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+
+        from omnia_desktop_clipper.ui.icon import plus_pixmap
+
+        # Keep a reference: PyQt6 destroys the C++ QApplication if the Python object is GC'd,
+        # which would break QPixmap construction below.
+        _app = QApplication.instance() or QApplication([])
+        iconset = Path("build") / "omnia.iconset"
+        iconset.mkdir(parents=True, exist_ok=True)
+        # macOS iconset: each logical size at 1x and 2x, with the exact required filenames.
+        for logical in (16, 32, 128, 256, 512):
+            plus_pixmap(logical).save(str(iconset / f"icon_{logical}x{logical}.png"))
+            plus_pixmap(logical * 2).save(str(iconset / f"icon_{logical}x{logical}@2x.png"))
+        icns = Path("build") / "omnia.icns"
+        subprocess.check_call(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)])
+        return icns
+    except Exception as exc:
+        print(f"Icon generation skipped ({exc}); building with the default icon.")
+        return None
+
+
+def build_args(icon: Path | None = None) -> list[str]:
     """Return the PyInstaller command line for the current OS."""
     args = [
         sys.executable,
@@ -47,6 +80,8 @@ def build_args() -> list[str]:
         "--collect-submodules",
         "pynput",
     ]
+    if icon is not None:
+        args += ["--icon", str(icon)]
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "com.omnia.desktopclipper"]
     args += ["run_desktop_clipper.py"]
@@ -124,7 +159,7 @@ def install_app() -> Path | None:
 
 def main() -> int:
     """Run PyInstaller; on macOS, also install the .app into /Applications (unless --no-install)."""
-    rc = subprocess.call(build_args())
+    rc = subprocess.call(build_args(make_icns()))
     if rc == 0 and sys.platform == "darwin":
         # Re-sign with a stable identifier requirement BEFORE installing, so the copy in
         # /Applications carries it too — this is what keeps TCC grants across rebuilds.

@@ -16,7 +16,7 @@ import sys
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication, QDialog, QStyle
+from PyQt6.QtWidgets import QApplication, QDialog
 
 from . import config as config_module
 from . import platform as platform_helpers
@@ -28,6 +28,7 @@ from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
 from .mouse_watcher import GlobalMouseWatcher
+from .ui.icon import plus_icon
 from .ui.plus_overlay import PlusOverlay
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
@@ -98,6 +99,7 @@ class ClipperApp(QObject):
         """
         super().__init__()
         self._app = app
+        self._app.setWindowIcon(plus_icon())  # dock / window icon matches the tray + web clipper
         self._config: Config = config_module.load()
         self._client = self._build_client()
         self._capture: SelectionCapture = build_clipboard_capture(
@@ -337,8 +339,5 @@ class ClipperApp(QObject):
             return None
 
     def _icon(self) -> QIcon:
-        """Return a stock icon for the tray (a placeholder until artwork ships)."""
-        style = self._app.style()
-        if style is None:  # pragma: no cover - a QApplication always has a style
-            return QIcon()
-        return style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        """Return the Omnia clipper icon (blue "+" mark, matching the web clipper)."""
+        return plus_icon()
