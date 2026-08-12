@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Optional
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt
+from PyQt6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, Qt
 from PyQt6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractScrollArea,
@@ -148,15 +148,18 @@ class LookupPanel(QWidget):
         self._fade.setEndValue(1.0)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt's API
-        """Dismiss when focus leaves: a popover the user clicked away from must not linger.
+    def event(self, event) -> bool:
+        """Dismiss the panel when its window stops being the active one.
 
-        Without this the panel is a singleton that only Esc could close, so a stale answer (in
-        particular an old error) stayed on screen and looked like it reappeared on every new
-        selection.
+        A popover must vanish when you click away from it. ``focusOutEvent`` is not enough for a
+        frameless tool window — focus can move without the widget being told — but
+        ``WindowDeactivate`` fires whenever the window loses activation, including a click on
+        another application or on the clipper's own tray icon, which is exactly the case that
+        left a stale panel on screen.
         """
-        self.hide()
-        super().focusOutEvent(event)
+        if event.type() == QEvent.Type.WindowDeactivate and self.isVisible():
+            self.hide()
+        return super().event(event)
 
     # -- states --------------------------------------------------------------------------
 
