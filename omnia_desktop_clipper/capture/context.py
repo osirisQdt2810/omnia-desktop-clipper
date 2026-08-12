@@ -199,14 +199,24 @@ class ContextProvider(abc.ABC):
     """Resolves the context (surrounding sentence) for a captured selection."""
 
     @abc.abstractmethod
-    def resolve(self, selection: str) -> str:
-        """Return the context for ``selection`` (falls back to ``selection`` itself)."""
+    def resolve(
+        self, selection: str, position: Optional[tuple[int, int]] = None
+    ) -> str:
+        """Return the context for ``selection`` (falls back to ``selection`` itself).
+
+        Args:
+            selection: The captured text.
+            position: Screen ``(x, y)`` where the gesture happened. When given it is the
+                strongest signal available — see :meth:`MacAXContextProvider.resolve`.
+        """
 
 
 class SelectionContextProvider(ContextProvider):
     """Universal fallback: the context IS the selection (no OS support needed)."""
 
-    def resolve(self, selection: str) -> str:
+    def resolve(
+        self, selection: str, position: Optional[tuple[int, int]] = None
+    ) -> str:
         return selection
 
 
@@ -323,10 +333,19 @@ class MacAXContextProvider(ContextProvider):
         # be wasteful, and the reader keys on mtime so an edited file is still re-read.
         self._pdf_reader = PdfTextReader()
 
-    def resolve(self, selection: str) -> str:
+    def resolve(
+        self, selection: str, position: Optional[tuple[int, int]] = None
+    ) -> str:
         selection = selection.strip()
         if not selection:
             return selection
+        # The POINT the user gestured at is the strongest signal there is: the accessibility
+        # element under it is the paragraph they were actually reading, so the right occurrence
+        # of a repeated word is identified rather than guessed. Tried first for that reason.
+        if position is not None:
+            located = self._context_at_position(selection, position)
+            if located:
+                return located
         try:
             text = self._surrounding_text(selection)
         except Exception:  # pragma: no cover - needs a live macOS AX session
@@ -339,6 +358,65 @@ class MacAXContextProvider(ContextProvider):
         if index < 0:
             return selection
         return sentence_around(text, index, len(selection)) or selection
+
+    def _context_at_position(
+        self, selection: str, position: tuple[int, int]
+    ) -> str:  # pragma: no cover - macOS + a live AX session only
+        """Return the sentence around ``selection`` in the element under ``position``, or ``""``.
+
+        ``AXUIElementCopyElementAtPosition`` resolves to the smallest element at a screen point.
+        Measured in Preview, scanning down a page returns five DIFFERENT paragraphs (33 to 367
+        characters each), so this really does localise — which is what makes a repeated word
+        resolvable: we read the paragraph the reader clicked in, not the first one on the page.
+
+        Walks up through ancestors when the exact hit carries no text (a point can land on a
+        wrapper), stopping as soon as an ancestor holds the selection.
+        """
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCopyElementAtPosition,
+                AXUIElementCreateSystemWide,
+                AXUIElementSetMessagingTimeout,
+            )
+
+            system = AXUIElementCreateSystemWide()
+            AXUIElementSetMessagingTimeout(system, _AX_TIMEOUT_SECONDS)
+            err, element = AXUIElementCopyElementAtPosition(
+                system, float(position[0]), float(position[1]), None
+            )
+            if err != 0 or element is None:
+                return ""
+
+            def attribute(node: Any, name: str) -> Any:
+                code, value = AXUIElementCopyAttributeValue(node, name, None)
+                return value if code == 0 else None
+
+            def value_of(node: Any) -> Optional[str]:
+                value = attribute(node, "AXValue")
+                return value if isinstance(value, str) else None
+
+            def children_of(node: Any) -> list:
+                return list(attribute(node, "AXChildren") or [])
+
+            # A point often lands on a WRAPPER that holds no text of its own, so searching only
+            # the hit and its ancestors left gaps. Reuse the same breadth-first search the
+            # focused-element route uses: it descends into children too, and returns the
+            # tightest node containing the selection.
+            roots: list[Any] = []
+            node = element
+            for _ in range(_MAX_ANCESTOR_HOPS + 1):
+                if node is None:
+                    break
+                roots.append(node)
+                node = attribute(node, "AXParent")
+            text = find_text_containing(roots, selection, value_of, children_of)
+            if not text:
+                return ""
+            index = text.find(selection)
+            return sentence_around(text, index, len(selection)) if index >= 0 else ""
+        except Exception:
+            return ""
 
     def _pdf_context(
         self, selection: str

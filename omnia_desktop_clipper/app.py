@@ -355,7 +355,9 @@ class ClipperApp(QObject):
         if not selection:
             return  # nothing selected -> no "+"
         word = selection.strip()
-        context = self._context.resolve(selection)
+        # Hand the gesture point to the resolver: the element under it is the paragraph the user
+        # was reading, which identifies WHICH occurrence of a repeated word they meant.
+        context = self._context.resolve(selection, position=(x, y))
         self._pending_capture = (word, context)
         self._last_gesture_pos = (x, y)
         # A new selection makes any panel on screen stale — hide it before showing the pill.
