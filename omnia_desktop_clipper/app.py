@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QDialog
 
@@ -23,7 +23,11 @@ from . import platform as platform_helpers
 from .anki import AnkiConnectClient, AnkiConnectError
 from .capture.base import SelectionCapture
 from .capture.clipboard import build_clipboard_capture
-from .capture.context import ContextProvider, build_context_provider
+from .capture.context import (
+    AccessibilityWarmer,
+    ContextProvider,
+    build_context_provider,
+)
 from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
@@ -124,6 +128,13 @@ class ClipperApp(QObject):
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
         # The (word, context) captured at gesture time, consumed when the "+" is clicked.
         self._pending_capture: tuple[str, str] | None = None
+        # Context capture reads the frontmost app's accessibility tree, and Chromium/Electron
+        # apps only expose one after they are asked (and take a moment to build it). Warm each
+        # app the first time it comes to the front, so a gesture never races that build-up.
+        self._warmer = AccessibilityWarmer()
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setInterval(1500)
+        self._warm_timer.timeout.connect(self._warm_frontmost)
 
         self._capture_requested.connect(self.capture_and_add)
         self._ocr_requested.connect(self.capture_ocr_and_add)
@@ -135,6 +146,7 @@ class ClipperApp(QObject):
         _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
         _request_macos_accessibility()  # register + prompt for Accessibility on macOS
         self._tray.show()
+        self._warm_timer.start()  # keep the frontmost app's AX tree ready for context capture
         self._sync_listeners()
 
     def _sync_listeners(self) -> None:
@@ -321,8 +333,17 @@ class ClipperApp(QObject):
         if pending is not None:
             self._confirm_and_add(*pending)
 
+    def _warm_frontmost(self) -> None:
+        """Warm the frontmost app's accessibility tree (once per app), off the main thread.
+
+        Resolving the frontmost app is AppKit, so it happens here on the Qt main thread; only the
+        pid is handed to the warmer, which does the (possibly slow) AX call on its own thread.
+        """
+        self._warmer.ensure(platform_helpers.frontmost_pid())
+
     def _shutdown(self) -> None:
         """Release the OS hotkey + mouse hooks on quit."""
+        self._warm_timer.stop()
         self._hotkey.stop()
         self._ocr_hotkey.stop()
         self._mouse_watcher.stop()
