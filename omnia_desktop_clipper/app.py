@@ -344,6 +344,8 @@ class ClipperApp(QObject):
         context = self._context.resolve(selection)
         self._pending_capture = (word, context)
         self._last_gesture_pos = (x, y)
+        # A new selection makes any panel on screen stale — hide it before showing the pill.
+        self._lookup_panel.hide()
         self._plus_overlay.set_lookup_hint(None, word)  # neutral until the probe answers
         self._plus_overlay.show_at(x, y)
         if self._config.lookup_enabled:

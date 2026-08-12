@@ -83,9 +83,12 @@ def _urllib_transport(url: str) -> dict[str, Any]:
             message = str(exc.reason)
         raise LookupUnavailableError(message) from exc
     except urllib.error.URLError as exc:
+        host = url.split("/lookup", 1)[0]
         raise LookupUnavailableError(
-            "Can't reach Anki's lookup service. Make sure Anki is running with the Omnia "
-            "add-on's “Word Lookup” feature enabled."
+            f"Can't reach Anki's lookup service at {host}.\n"
+            "• Is Anki running?\n"
+            "• Is Omnia → Word Lookup switched on? (it starts the service)\n"
+            "Enabling it in Anki takes effect immediately — just try again."
         ) from exc
     except (TimeoutError, OSError) as exc:
         raise LookupUnavailableError("The lookup timed out.") from exc

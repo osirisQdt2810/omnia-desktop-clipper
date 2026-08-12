@@ -42,8 +42,16 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
-# Characters that terminate a sentence when scanning outward from the selection.
-_SENTENCE_BOUNDARIES = ".!?\n\r"
+# Characters that end a sentence. A newline is deliberately NOT one: a sentence in a document,
+# an editor or a wrapped web page routinely spans lines, and stopping at the line break was
+# giving "context = this line" instead of the actual sentence.
+_SENTENCE_ENDERS = ".!?"
+# Hard boundaries that always stop the scan: a blank line separates paragraphs, so the sentence
+# can never run past one even when nobody wrote a full stop.
+_PARAGRAPH_BREAK = "\n\n"
+# Cap on how far the scan may run without meeting a sentence ender (code, lists, headings often
+# have none). Beyond this we fall back to the selection's own line, which is always sane.
+_MAX_SENTENCE_CHARS = 400
 
 # Search bounds. Kept small deliberately: every real hit measured so far was within 3 nodes, and
 # an unbounded walk of a big app's AX tree would stall the "+" overlay.
@@ -53,13 +61,28 @@ _MAX_CHILDREN = 60
 _MAX_ANCESTOR_HOPS = 3
 # A stuck app must not freeze the capture path (the "+" is shown right after this returns).
 _AX_TIMEOUT_SECONDS = 1.0
+# Warm-up polling: Chromium needs a couple of seconds of being asked before its renderer tree
+# appears, so one query is not enough. Bounded so a non-AX app costs at most a few idle seconds
+# on a background thread, once.
+_WARM_ATTEMPTS = 12
+_WARM_DELAY_SECONDS = 0.5
 
 
 def sentence_around(text: str, start: int, length: int) -> str:
     """Return the sentence in ``text`` that contains the span ``[start, start+length)``.
 
-    Scans left/right from the span to the nearest sentence boundary (``.!?`` or newline)
-    and returns the trimmed sentence. Returns ``""`` for an out-of-range span.
+    Scans outward to the nearest sentence ender (``.``/``!``/``?``), **crossing line breaks** —
+    a sentence in prose, an editor or a wrapped page regularly spans lines, and treating a
+    newline as an ender was what made the captured context read as "just this line".
+
+    Two guards keep that from over-reaching:
+
+    * a blank line (paragraph break) always stops the scan;
+    * if no ender is met within :data:`_MAX_SENTENCE_CHARS`, the span falls back to the
+      selection's own line — text without full stops (code, lists, headings) must not return a
+      whole document.
+
+    Returns ``""`` for an out-of-range span.
 
     Args:
         text: The full surrounding text (e.g. the focused field's value).
@@ -67,20 +90,49 @@ def sentence_around(text: str, start: int, length: int) -> str:
         length: The span's length.
 
     Returns:
-        The enclosing sentence (stripped), or ``""`` if the span is out of range.
+        The enclosing sentence with internal line breaks collapsed to spaces, or ``""``.
     """
     if start < 0 or length < 0 or start + length > len(text):
         return ""
-    left = start
-    while left > 0 and text[left - 1] not in _SENTENCE_BOUNDARIES:
-        left -= 1
-    right = start + length
-    while right < len(text) and text[right] not in _SENTENCE_BOUNDARIES:
-        right += 1
-    # Keep the terminating punctuation (. ! ?) as part of the sentence, but not a newline.
-    if right < len(text) and text[right] in ".!?":
-        right += 1
-    return text[left:right].strip()
+    end = start + length
+    left = _scan_left(text, start)
+    right = _scan_right(text, end)
+    if right - left > _MAX_SENTENCE_CHARS:
+        left, right = _line_bounds(text, start, end)
+    return " ".join(text[left:right].split())
+
+
+def _scan_left(text: str, start: int) -> int:
+    """Index just after the sentence ender / paragraph break preceding ``start``."""
+    limit = max(0, start - _MAX_SENTENCE_CHARS)
+    index = start
+    while index > limit:
+        if text[index - 1] in _SENTENCE_ENDERS:
+            return index
+        if text[index - 1] == "\n" and text[max(0, index - 2) : index] == _PARAGRAPH_BREAK:
+            return index
+        index -= 1
+    return index
+
+
+def _scan_right(text: str, end: int) -> int:
+    """Index just after the sentence ender / before the paragraph break following ``end``."""
+    limit = min(len(text), end + _MAX_SENTENCE_CHARS)
+    index = end
+    while index < limit:
+        if text[index] in _SENTENCE_ENDERS:
+            return index + 1  # keep the full stop as part of the sentence
+        if text[index : index + 2] == _PARAGRAPH_BREAK:
+            return index
+        index += 1
+    return index
+
+
+def _line_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """The bounds of the line(s) holding ``[start, end)`` — the no-full-stop fallback."""
+    left = text.rfind("\n", 0, start) + 1
+    right = text.find("\n", end)
+    return left, len(text) if right < 0 else right
 
 
 def find_text_containing(
@@ -150,18 +202,32 @@ class SelectionContextProvider(ContextProvider):
         return selection
 
 
-def warm_accessibility(pid: int) -> bool:
+def warm_accessibility(
+    pid: int, attempts: int = _WARM_ATTEMPTS, delay: float = _WARM_DELAY_SECONDS
+) -> bool:
     """Switch on (and pre-build) an app's accessibility tree. Safe to call repeatedly.
 
     Chromium builds its AX tree lazily and Electron apps need ``AXManualAccessibility`` set
-    before they expose one at all. Both take a moment, so callers run this OFF the capture path
-    (e.g. when the frontmost app changes) — by gesture time the tree is ready and the lookup is
-    instant. Returns ``True`` if the app already answers AX queries.
+    before they expose one at all. Crucially, ONE query is not enough for Chromium: it answers
+    ``kAXErrorNoValue`` for a couple of seconds while the renderer tree is constructed, and only
+    sustained asking makes it appear — a single-shot warm left Chrome permanently unreadable and
+    the captured context stuck at one word. So this polls until the app answers or the attempts
+    run out.
+
+    Runs OFF the capture path (a background thread; see :class:`AccessibilityWarmer`), so the
+    polling never delays the "+" or the capture itself.
 
     Args:
         pid: The target application's process id.
+        attempts: How many times to ask before giving up.
+        delay: Seconds between attempts.
+
+    Returns:
+        Whether the app ended up answering AX queries.
     """
     try:  # pragma: no cover - macOS + Accessibility permission only
+        import time
+
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
             AXUIElementCreateApplication,
@@ -171,11 +237,22 @@ def warm_accessibility(pid: int) -> bool:
 
         ax_app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ax_app, _AX_TIMEOUT_SECONDS)
-        # Electron/Chromium opt-in. Unsupported elsewhere (a plain error we ignore).
-        AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
-        # The query itself is what makes Chromium start building the tree.
-        err, focused = AXUIElementCopyAttributeValue(ax_app, "AXFocusedUIElement", None)
-        return err == 0 and focused is not None
+        # Two different opt-ins, because no single one covers both families:
+        #   AXManualAccessibility  — Electron's documented switch (VSCode, Slack, …);
+        #   AXEnhancedUserInterface — the flag AppKit sets when VoiceOver runs, which is what
+        #                             makes Chrome build its renderer tree.
+        # Whichever the app does not understand simply returns an error we ignore.
+        for attribute in ("AXManualAccessibility", "AXEnhancedUserInterface"):
+            AXUIElementSetAttributeValue(ax_app, attribute, True)
+        for attempt in range(max(1, attempts)):
+            err, focused = AXUIElementCopyAttributeValue(
+                ax_app, "AXFocusedUIElement", None
+            )
+            if err == 0 and focused is not None:
+                return True
+            if attempt < attempts - 1:
+                time.sleep(delay)
+        return False
     except Exception:
         return False
 

@@ -19,10 +19,28 @@ class TestSentenceAround:
         got = sentence_around(text, text.index("fox"), len("fox"))
         assert got == "The quick brown fox jumps."
 
-    def test_handles_newline_boundaries(self) -> None:
-        text = "line one\nthe target word here\nline three"
+    def test_sentence_crosses_line_breaks(self) -> None:
+        # The point of the change: a sentence wrapped over lines is ONE sentence, not "this line".
+        text = "Intro. The quick brown\nfox jumps over it. Third one."
+        got = sentence_around(text, text.index("fox"), len("fox"))
+        assert got == "The quick brown fox jumps over it."
+
+    def test_stops_at_a_paragraph_break(self) -> None:
+        text = "First para about the fox\n\nSecond para entirely unrelated"
+        got = sentence_around(text, text.index("fox"), len("fox"))
+        assert got == "First para about the fox"
+
+    def test_falls_back_to_the_line_when_there_is_no_full_stop(self) -> None:
+        # Code / lists / headings have no sentence enders; returning the whole buffer would be
+        # useless, so the selection's own line is used instead.
+        line = "def compute_target_value(self) -> int:"
+        text = ("x" * 500) + "\n" + line + "\n" + ("y" * 500)
         got = sentence_around(text, text.index("target"), len("target"))
-        assert got == "the target word here"
+        assert got == line
+
+    def test_collapses_internal_whitespace(self) -> None:
+        text = "The  fox\n   jumps."
+        assert sentence_around(text, text.index("fox"), 3) == "The fox jumps."
 
     def test_first_sentence(self) -> None:
         text = "Alpha beta gamma. Next sentence."
