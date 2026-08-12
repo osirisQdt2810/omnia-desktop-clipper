@@ -127,15 +127,14 @@ class ClipperApp(QObject):
         self._ocr_hotkey = GlobalHotkey(self._config.ocr_hotkey, self._on_ocr_hotkey)
         # Floating "+": a global mouse hook detects a select gesture; we capture the selection
         # THEN (source app still focused) and show the "+"; clicking it adds the captured note.
+        # Always wire the lookup callback and let the config decide visibility, so Settings can
+        # toggle the magnifier without rebuilding the overlay.
         self._plus_overlay = ActionOverlay(
-            self._on_plus_clicked,
-            on_lookup=self._on_lookup_clicked if self._config.lookup_enabled else None,
+            self._on_plus_clicked, on_lookup=self._on_lookup_clicked
         )
+        self._plus_overlay.set_lookup_enabled(self._config.lookup_enabled)
         # Lookup: omnia's add-on plugin does the searching/triage; this app renders the answer.
-        self._lookup = LookupService(LookupClient(self._config.lookup_url))
-        self._lookup.finished.connect(self._on_lookup_finished)
-        self._lookup.failed.connect(self._on_lookup_failed)
-        self._lookup.probed.connect(self._on_lookup_probed)
+        self._lookup = self._build_lookup_service()
         self._lookup_panel = LookupPanel(
             on_add=self._add_pending_capture, on_open_in_anki=self._open_in_anki
         )
@@ -281,9 +280,13 @@ class ClipperApp(QObject):
             new_config.hotkey != self._config.hotkey
             or new_config.ocr_hotkey != self._config.ocr_hotkey
         )
+        lookup_url_changed = new_config.lookup_url != self._config.lookup_url
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
+        if lookup_url_changed:
+            self._lookup = self._build_lookup_service()
+        self._plus_overlay.set_lookup_enabled(new_config.lookup_enabled)
         # NB: we do NOT restart the keyboard hotkey listeners here — that would SIGTRAP (see
         # _sync_listeners). A changed hotkey string is saved and applies on the next app launch.
         self._sync_listeners()
@@ -405,6 +408,14 @@ class ClipperApp(QObject):
         self._hotkey.stop()
         self._ocr_hotkey.stop()
         self._mouse_watcher.stop()
+
+    def _build_lookup_service(self) -> LookupService:
+        """Construct the lookup service for the configured URL and wire its signals."""
+        service = LookupService(LookupClient(self._config.lookup_url))
+        service.finished.connect(self._on_lookup_finished)
+        service.failed.connect(self._on_lookup_failed)
+        service.probed.connect(self._on_lookup_probed)
+        return service
 
     def _build_client(self) -> AnkiConnectClient:
         """Construct an AnkiConnect client from the current config."""

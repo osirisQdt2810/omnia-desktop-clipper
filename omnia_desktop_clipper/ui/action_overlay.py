@@ -66,7 +66,8 @@ class ActionOverlay(QWidget):
         Args:
             on_add: Called (Qt main thread) when the "+" is clicked.
             on_lookup: Called when the magnifier is clicked. ``None`` hides that button, which
-                reduces the pill to exactly the original single-"+" overlay.
+                reduces the pill to exactly the original single-"+" overlay. Pass the callback
+                and use :meth:`set_lookup_enabled` when the button must toggle at runtime.
         """
         super().__init__(
             None,
@@ -118,6 +119,12 @@ class ActionOverlay(QWidget):
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
+
+    def set_lookup_enabled(self, enabled: bool) -> None:
+        """Show or hide the magnifier (Settings can toggle it while the app runs)."""
+        self._lookup_visible = enabled and self._on_lookup is not None
+        self._lookup_button.setVisible(self._lookup_visible)
+        self._resize_to_content()
 
     # -- geometry ------------------------------------------------------------------------
 

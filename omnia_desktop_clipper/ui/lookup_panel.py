@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 
 from ..lookup.client import LookupCardView, LookupView
 from . import theme
+from .flow_layout import flow_widget
 from .macos_window import promote_over_all_apps
 
 _WIDTH = 420
@@ -214,10 +215,12 @@ class LookupPanel(QWidget):
             self._body.addWidget(holder)
 
     def _meta_row(self, card: LookupCardView, total: int) -> QWidget:
-        """Deck / interval / reps / lapses / tags as compact chips."""
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.setContentsMargins(0, 0, 0, 0)
+        """Deck / interval / reps / lapses as compact chips that WRAP rather than clip.
+
+        These carry user data (deck names, counts) whose combined width is unpredictable; a
+        plain row silently truncated them mid-word ("Unit 06-1", "1d interva").
+        """
+        holder, row = flow_widget(spacing=6)
         if card.deck:
             # Deck paths ("A::B::C") are far too long for a chip and clip mid-word; the leaf is
             # the informative part, with the full path on hover.
@@ -233,9 +236,6 @@ class LookupPanel(QWidget):
             row.addWidget(_chip(f"{card.lapses} lapses"))
         if total > 1:
             row.addWidget(_chip(f"+{total - 1} more note(s)"))
-        row.addStretch(1)
-        holder = QWidget()
-        holder.setLayout(row)
         return holder
 
     @staticmethod
