@@ -61,6 +61,11 @@ _MAX_CHILDREN = 60
 _MAX_ANCESTOR_HOPS = 3
 # A stuck app must not freeze the capture path (the "+" is shown right after this returns).
 _AX_TIMEOUT_SECONDS = 1.0
+# Warm-up polling: Chromium needs a couple of seconds of being asked before its renderer tree
+# appears, so one query is not enough. Bounded so a non-AX app costs at most a few idle seconds
+# on a background thread, once.
+_WARM_ATTEMPTS = 12
+_WARM_DELAY_SECONDS = 0.5
 
 
 def sentence_around(text: str, start: int, length: int) -> str:
@@ -197,18 +202,32 @@ class SelectionContextProvider(ContextProvider):
         return selection
 
 
-def warm_accessibility(pid: int) -> bool:
+def warm_accessibility(
+    pid: int, attempts: int = _WARM_ATTEMPTS, delay: float = _WARM_DELAY_SECONDS
+) -> bool:
     """Switch on (and pre-build) an app's accessibility tree. Safe to call repeatedly.
 
     Chromium builds its AX tree lazily and Electron apps need ``AXManualAccessibility`` set
-    before they expose one at all. Both take a moment, so callers run this OFF the capture path
-    (e.g. when the frontmost app changes) — by gesture time the tree is ready and the lookup is
-    instant. Returns ``True`` if the app already answers AX queries.
+    before they expose one at all. Crucially, ONE query is not enough for Chromium: it answers
+    ``kAXErrorNoValue`` for a couple of seconds while the renderer tree is constructed, and only
+    sustained asking makes it appear — a single-shot warm left Chrome permanently unreadable and
+    the captured context stuck at one word. So this polls until the app answers or the attempts
+    run out.
+
+    Runs OFF the capture path (a background thread; see :class:`AccessibilityWarmer`), so the
+    polling never delays the "+" or the capture itself.
 
     Args:
         pid: The target application's process id.
+        attempts: How many times to ask before giving up.
+        delay: Seconds between attempts.
+
+    Returns:
+        Whether the app ended up answering AX queries.
     """
     try:  # pragma: no cover - macOS + Accessibility permission only
+        import time
+
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
             AXUIElementCreateApplication,
@@ -218,11 +237,22 @@ def warm_accessibility(pid: int) -> bool:
 
         ax_app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(ax_app, _AX_TIMEOUT_SECONDS)
-        # Electron/Chromium opt-in. Unsupported elsewhere (a plain error we ignore).
-        AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
-        # The query itself is what makes Chromium start building the tree.
-        err, focused = AXUIElementCopyAttributeValue(ax_app, "AXFocusedUIElement", None)
-        return err == 0 and focused is not None
+        # Two different opt-ins, because no single one covers both families:
+        #   AXManualAccessibility  — Electron's documented switch (VSCode, Slack, …);
+        #   AXEnhancedUserInterface — the flag AppKit sets when VoiceOver runs, which is what
+        #                             makes Chrome build its renderer tree.
+        # Whichever the app does not understand simply returns an error we ignore.
+        for attribute in ("AXManualAccessibility", "AXEnhancedUserInterface"):
+            AXUIElementSetAttributeValue(ax_app, attribute, True)
+        for attempt in range(max(1, attempts)):
+            err, focused = AXUIElementCopyAttributeValue(
+                ax_app, "AXFocusedUIElement", None
+            )
+            if err == 0 and focused is not None:
+                return True
+            if attempt < attempts - 1:
+                time.sleep(delay)
+        return False
     except Exception:
         return False
 
