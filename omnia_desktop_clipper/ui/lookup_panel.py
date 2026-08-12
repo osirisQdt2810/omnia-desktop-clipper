@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 
 from ..lookup.client import LookupCardView, LookupView
 from . import theme
+from .audio import play_bytes
 from .flow_layout import flow_widget
 from .macos_window import promote_over_all_apps
 
@@ -344,7 +345,7 @@ class LookupPanel(QWidget):
         else:
             # Media-only field: say what it holds instead of rendering raw markup...
             bits = []
-            if field.audio:
+            if field.audio and not self._can_play_audio():
                 bits.append(f"🔊 {len(field.audio)} audio")
             if field.images and not self._can_show_images():
                 bits.append(f"🖼 {len(field.images)} image")
@@ -352,15 +353,48 @@ class LookupPanel(QWidget):
                 badge = QLabel("  ".join(bits))
                 badge.setObjectName("lookupSubtitle")
                 layout.addWidget(badge)
-            elif not field.images:
+            elif not field.images and not field.audio:
                 badge = QLabel("—")
                 badge.setObjectName("lookupSubtitle")
                 layout.addWidget(badge)
         # ...but an image is worth seeing, so offer to load it (fetching is a round-trip to
         # Anki, so it happens on demand rather than for every field of every result).
+        if field.audio and self._can_play_audio():
+            layout.addWidget(self._audio_block(field.audio))
         if field.images and self._can_show_images():
             layout.addWidget(self._image_block(field.images))
         return holder
+
+    def _can_play_audio(self) -> bool:
+        """Audio needs the same media fetcher images do (the clip lives in Anki's media folder)."""
+        return self._request_media is not None
+
+    def _audio_block(self, filenames: tuple[str, ...]) -> QWidget:
+        """A Play button per clip — a pronunciation you cannot hear is just a dead badge."""
+        holder, row = flow_widget(spacing=6)
+        for name in filenames:
+            button = QPushButton("▶ Play" if len(filenames) == 1 else f"▶ {name[:18]}")
+            button.setObjectName("lookupAction")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(name)
+            button.clicked.connect(
+                lambda _checked=False, target=name, btn=button: self._play(target, btn)
+            )
+            row.addWidget(button)
+        return holder
+
+    def _play(self, filename: str, button: QPushButton) -> None:
+        """Fetch the clip (off the UI thread) and hand it to the OS player."""
+        original = button.text()
+        button.setEnabled(False)
+        button.setText("…")
+
+        def ready(data: object) -> None:
+            ok = isinstance(data, (bytes, bytearray)) and play_bytes(bytes(data), filename)
+            button.setText(original if ok else "unavailable")
+            button.setEnabled(True)
+
+        self._request_media(filename, ready)
 
     def _can_show_images(self) -> bool:
         """Whether a media fetcher was supplied (no fetcher = images stay as a badge)."""
