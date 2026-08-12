@@ -42,6 +42,13 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
+from .pdf_context import (
+    PdfTextReader,
+    is_pdf,
+    parse_page_number,
+    path_from_document_url,
+)
+
 # Characters that end a sentence. A newline is deliberately NOT one: a sentence in a document,
 # an editor or a wrapped web page routinely spans lines, and stopping at the line break was
 # giving "context = this line" instead of the actual sentence.
@@ -310,6 +317,11 @@ class MacAXContextProvider(ContextProvider):
     degrades to returning the selection unchanged.
     """
 
+    def __init__(self) -> None:
+        # Caches the opened PDF between captures; re-opening a 90-page document each time would
+        # be wasteful, and the reader keys on mtime so an edited file is still re-read.
+        self._pdf_reader = PdfTextReader()
+
     def resolve(self, selection: str) -> str:
         selection = selection.strip()
         if not selection:
@@ -319,11 +331,56 @@ class MacAXContextProvider(ContextProvider):
         except Exception:  # pragma: no cover - needs a live macOS AX session
             return selection
         if not text:
-            return selection
+            # Accessibility gave nothing. In a PDF that is not a bug to work around but a hard
+            # wall (Preview exposes only AXSelectedText), so read the document itself instead.
+            return self._pdf_context(selection) or selection
         index = text.find(selection)
         if index < 0:
             return selection
         return sentence_around(text, index, len(selection)) or selection
+
+    def _pdf_context(
+        self, selection: str
+    ) -> str:  # pragma: no cover - macOS + a PDF viewer only
+        """Return the enclosing sentence read from the open PDF, or ``""``.
+
+        Uses the focused window's ``AXDocument`` (which file) and title (which page), then reads
+        the page with PDFKit. Best-effort at every step: any failure just means no context.
+        """
+        try:
+            from AppKit import NSWorkspace
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCreateApplication,
+                AXUIElementSetMessagingTimeout,
+            )
+
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is None:
+                return ""
+            ax_app = AXUIElementCreateApplication(app.processIdentifier())
+            AXUIElementSetMessagingTimeout(ax_app, _AX_TIMEOUT_SECONDS)
+
+            def attribute(element: Any, name: str) -> Any:
+                err, value = AXUIElementCopyAttributeValue(element, name, None)
+                return value if err == 0 else None
+
+            window = attribute(ax_app, "AXFocusedWindow")
+            if window is None:
+                return ""
+            path = path_from_document_url(str(attribute(window, "AXDocument") or ""))
+            if not path or not is_pdf(path):
+                return ""
+            page = parse_page_number(str(attribute(window, "AXTitle") or ""))
+            for text in self._pdf_reader.page_texts(path, page):
+                index = text.lower().find(selection.lower())
+                if index >= 0:
+                    found = sentence_around(text, index, len(selection))
+                    if found:
+                        return found
+            return ""
+        except Exception:
+            return ""
 
     @staticmethod
     def _surrounding_text(
