@@ -9,6 +9,7 @@ from omnia_desktop_clipper.capture.pdf_context import (
     pages_to_search,
     parse_page_number,
     path_from_document_url,
+    unique_occurrence,
 )
 
 
@@ -56,18 +57,42 @@ class TestIsPdf:
 
 
 class TestPagesToSearch:
-    def test_current_page_comes_first_then_neighbours(self):
-        # A sentence can straddle a page break, and the title can lag a scroll by one.
-        assert pages_to_search(57, 90) == [56, 57, 55]
+    def test_only_the_page_on_screen_is_searched(self):
+        # Neighbours are deliberately NOT searched: with the uniqueness gate that silently
+        # returned a sentence from a page the reader was not looking at.
+        assert pages_to_search(57, 90) == [56]
 
-    def test_clamps_at_the_first_page(self):
-        assert pages_to_search(1, 90) == [0, 1]
+    def test_first_and_last_pages(self):
+        assert pages_to_search(1, 90) == [0]
+        assert pages_to_search(90, 90) == [89]
 
-    def test_clamps_at_the_last_page(self):
-        assert pages_to_search(90, 90) == [89, 88]
+    def test_out_of_range_page_yields_nothing(self):
+        assert pages_to_search(200, 90) == []
 
     def test_unknown_page_falls_back_to_every_page(self):
         assert pages_to_search(None, 3) == [0, 1, 2]
 
     def test_empty_document(self):
         assert pages_to_search(1, 0) == []
+
+
+class TestUniqueOccurrence:
+    """The honesty gate: act only when there is no guess to make."""
+
+    def test_a_single_occurrence_is_located(self):
+        assert unique_occurrence("the cat sat", "cat") == 4
+
+    def test_a_repeated_word_is_refused(self):
+        # Accessibility cannot say WHICH one the reader highlighted, so a confidently-wrong
+        # sentence must not be produced.
+        assert unique_occurrence("the cat saw a cat", "cat") == -1
+
+    def test_matching_ignores_case(self):
+        assert unique_occurrence("The Cat sat", "cat") == 4
+
+    def test_missing_word(self):
+        assert unique_occurrence("the dog sat", "cat") == -1
+
+    def test_blank_inputs(self):
+        assert unique_occurrence("", "cat") == -1
+        assert unique_occurrence("the cat", "") == -1

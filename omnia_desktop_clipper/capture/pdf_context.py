@@ -24,9 +24,10 @@ from urllib.parse import unquote, urlparse
 # Preview titles a window "<file> — Page 57 of 90"; other viewers use "57 / 90". Both give the
 # page the reader is on, which is the only reliable way to pick the right occurrence.
 _PAGE_IN_TITLE_RE = re.compile(r"(\d+)\s*(?:of|/)\s*(\d+)")
-# How far either side of the current page to look when the word is not on it (a sentence can
-# start on the previous page, and the title can lag a scroll by one).
-_NEIGHBOUR_PAGES = 1
+# Only the page on screen is searched. Looking at neighbours as well sounded harmless — a
+# sentence can straddle a page break — but combined with the uniqueness gate it silently jumped
+# to a DIFFERENT page whenever the word repeated on the current one, handing back a sentence the
+# reader was not looking at. That is precisely the guess this module refuses to make.
 
 
 def parse_page_number(title: str) -> Optional[int]:
@@ -62,11 +63,12 @@ def is_pdf(path: str) -> bool:
 
 
 def pages_to_search(page_number: Optional[int], page_count: int) -> list[int]:
-    """Return 0-based page indices to search, nearest the reader first.
+    """Return the 0-based page indices to search.
 
-    With a known page we look at it and its immediate neighbours (a sentence can straddle a page
-    break, and a title can lag a scroll). With no page number we fall back to every page, which
-    is right but can pick a different occurrence of a common word.
+    A known page number gives exactly that page — the one the reader is looking at. Without one
+    every page is searched, which is still guess-free because the caller then requires the word
+    to be unique across the WHOLE document: unique everywhere means it can only be the one that
+    was selected.
 
     Args:
         page_number: The 1-based page on screen, or ``None`` if it could not be parsed.
@@ -77,10 +79,31 @@ def pages_to_search(page_number: Optional[int], page_count: int) -> list[int]:
     if page_number is None:
         return list(range(page_count))
     current = page_number - 1
-    order = [current]
-    for offset in range(1, _NEIGHBOUR_PAGES + 1):
-        order.extend([current + offset, current - offset])
-    return [index for index in order if 0 <= index < page_count]
+    return [current] if 0 <= current < page_count else []
+
+
+def unique_occurrence(text: str, needle: str) -> int:
+    """Index of ``needle`` in ``text`` when it appears EXACTLY once, else ``-1``.
+
+    This is the honesty gate for the PDF route. A page holds ~3000 characters and accessibility
+    cannot say WHICH occurrence the reader highlighted — Preview exposes the whole page as one
+    static-text block, and there is no selection range or text marker to locate within it. So a
+    repeated word leaves us guessing, and a confidently-wrong sentence the reader never looked at
+    is worse than no context at all: it would be copied into a card as if it were the source.
+
+    One occurrence means no guess is involved, which is the only case we act on.
+
+    Args:
+        text: The page text to search.
+        needle: The captured selection.
+    """
+    if not text or not needle:
+        return -1
+    lowered, target = text.lower(), needle.lower()
+    first = lowered.find(target)
+    if first < 0 or lowered.find(target, first + 1) >= 0:
+        return -1
+    return first
 
 
 class PdfTextReader:

@@ -47,6 +47,7 @@ from .pdf_context import (
     is_pdf,
     parse_page_number,
     path_from_document_url,
+    unique_occurrence,
 )
 
 # Characters that end a sentence. A newline is deliberately NOT one: a sentence in a document,
@@ -372,13 +373,17 @@ class MacAXContextProvider(ContextProvider):
             if not path or not is_pdf(path):
                 return ""
             page = parse_page_number(str(attribute(window, "AXTitle") or ""))
-            for text in self._pdf_reader.page_texts(path, page):
-                index = text.lower().find(selection.lower())
-                if index >= 0:
-                    found = sentence_around(text, index, len(selection))
-                    if found:
-                        return found
-            return ""
+            texts = self._pdf_reader.page_texts(path, page)
+            if not texts:
+                return ""
+            # With a known page there is exactly one text (that page). Without one, every page is
+            # joined so uniqueness is judged across the WHOLE document — either way the word must
+            # be unambiguous before its sentence is used (see unique_occurrence).
+            haystack = texts[0] if page is not None else "\n\n".join(texts)
+            index = unique_occurrence(haystack, selection)
+            if index < 0:
+                return ""
+            return sentence_around(haystack, index, len(selection))
         except Exception:
             return ""
 
