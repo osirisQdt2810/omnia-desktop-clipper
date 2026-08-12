@@ -106,6 +106,16 @@ class LookupPanel(QWidget):
         # Esc closes — this panel takes focus, so it must be dismissable from the keyboard.
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.hide)
 
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt's API
+        """Dismiss when focus leaves: a popover the user clicked away from must not linger.
+
+        Without this the panel is a singleton that only Esc could close, so a stale answer (in
+        particular an old error) stayed on screen and looked like it reappeared on every new
+        selection.
+        """
+        self.hide()
+        super().focusOutEvent(event)
+
     # -- states --------------------------------------------------------------------------
 
     def show_loading(self, word: str, position: tuple[int, int]) -> None:
