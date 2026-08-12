@@ -164,6 +164,14 @@ class AnkiConnectClient:
         result = self._invoke("addNote", {"note": note})
         return int(result) if result is not None else 0
 
+    def gui_browse(self, query: str) -> None:
+        """Open Anki's card browser on ``query`` (AnkiConnect ``guiBrowse``).
+
+        Used by the lookup panel's "Open in Anki" so a found card is one click from being
+        edited. Anki must be running; a failure raises like any other invoke.
+        """
+        self._invoke("guiBrowse", {"query": query})
+
     def deck_names(self) -> list[str]:
         """Return all deck names (AnkiConnect ``deckNames``), for the settings picker."""
         return self._string_list("deckNames", {})

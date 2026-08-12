@@ -98,6 +98,11 @@ class Config:
     # Master on/off switch. When off, NOTHING captures — the hotkeys and the "+" mouse hook are
     # stopped and the tray/capture actions no-op. Toggle it in Settings or the tray menu.
     enabled: bool = True
+    # Show a magnifier next to the "+" that looks the word up in the Anki collection. The search
+    # itself is served by the omnia add-on's "Word Lookup" plugin (which owns which note types are
+    # searchable and which fields are worth showing); this URL is where that plugin listens.
+    lookup_enabled: bool = True
+    lookup_url: str = "http://127.0.0.1:8766"
 
     def tags(self) -> list[str]:
         """Return the note tags: the source tag + ``omnia-autogen`` if enabled."""
@@ -140,6 +145,8 @@ class Config:
             ocr_hotkey=_as_str(data.get("ocr_hotkey"), base.ocr_hotkey),
             plus_overlay=_as_bool(data.get("plus_overlay"), base.plus_overlay),
             enabled=_as_bool(data.get("enabled"), base.enabled),
+            lookup_enabled=_as_bool(data.get("lookup_enabled"), base.lookup_enabled),
+            lookup_url=_as_str(data.get("lookup_url"), base.lookup_url),
         )
 
 

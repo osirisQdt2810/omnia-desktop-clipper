@@ -51,6 +51,23 @@ def config_dir(
     return root / _LINUX_APP_DIR
 
 
+def frontmost_pid() -> int | None:
+    """Return the frontmost application's process id, or ``None`` if unavailable.
+
+    macOS only (AppKit ``NSWorkspace``); other platforms have no equivalent the clipper needs,
+    so they get ``None``. Must be called on the main thread — ``NSWorkspace`` is AppKit.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return None if app is None else int(app.processIdentifier())
+    except Exception:
+        return None
+
+
 def cursor_pos() -> tuple[int, int]:
     """Return the global mouse-cursor position as ``(x, y)`` in screen pixels."""
     from PyQt6.QtGui import QCursor

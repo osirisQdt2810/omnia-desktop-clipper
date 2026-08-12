@@ -72,6 +72,23 @@ class SettingsDialog(QDialog):
             "Enable the clipper (master switch: hotkeys + floating +). Off = capture nothing."
         )
         self._enabled_check.setChecked(config.enabled)
+        self._lookup_check = QCheckBox(
+            "Show a magnifier next to the + to look the word up in your Anki collection"
+        )
+        self._lookup_check.setChecked(config.lookup_enabled)
+        self._lookup_check.setToolTip(
+            "Served by the Omnia add-on's “Word Lookup” feature, which decides which note "
+            "types are searchable and which fields are worth showing.\n"
+            "Off = the overlay is just the “+”, exactly as before."
+        )
+        self._lookup_url_edit = QLineEdit(config.lookup_url)
+        self._lookup_url_edit.setToolTip(
+            "Where the Omnia add-on's lookup service listens (loopback only). Change this only "
+            "if you changed the port in Anki → Omnia → Word Lookup."
+        )
+        # The URL is only meaningful while the lookup is on.
+        self._lookup_check.toggled.connect(self._lookup_url_edit.setEnabled)
+        self._lookup_url_edit.setEnabled(config.lookup_enabled)
 
         self._populate_decks_and_models()
         self._populate_fields(self._model_combo.currentText())
@@ -91,6 +108,8 @@ class SettingsDialog(QDialog):
         form.addRow("OCR hotkey", self._ocr_hotkey_edit)
         form.addRow(self._autogen_check)
         form.addRow(self._plus_overlay_check)
+        form.addRow(self._lookup_check)
+        form.addRow("Lookup service URL", self._lookup_url_edit)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -180,4 +199,6 @@ class SettingsDialog(QDialog):
             ocr_hotkey=self._ocr_hotkey_edit.text().strip(),
             plus_overlay=self._plus_overlay_check.isChecked(),
             enabled=self._enabled_check.isChecked(),
+            lookup_enabled=self._lookup_check.isChecked(),
+            lookup_url=self._lookup_url_edit.text().strip(),
         )

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QDialog
 
@@ -23,13 +23,20 @@ from . import platform as platform_helpers
 from .anki import AnkiConnectClient, AnkiConnectError
 from .capture.base import SelectionCapture
 from .capture.clipboard import build_clipboard_capture
-from .capture.context import ContextProvider, build_context_provider
+from .capture.context import (
+    AccessibilityWarmer,
+    ContextProvider,
+    build_context_provider,
+)
 from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
+from .lookup.client import LookupClient
+from .lookup.service import LookupService
 from .mouse_watcher import GlobalMouseWatcher
 from .ui.icon import plus_icon
-from .ui.plus_overlay import PlusOverlay
+from .ui.action_overlay import ActionOverlay
+from .ui.lookup_panel import LookupPanel
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
 from .ui.settings import SettingsDialog
@@ -120,10 +127,29 @@ class ClipperApp(QObject):
         self._ocr_hotkey = GlobalHotkey(self._config.ocr_hotkey, self._on_ocr_hotkey)
         # Floating "+": a global mouse hook detects a select gesture; we capture the selection
         # THEN (source app still focused) and show the "+"; clicking it adds the captured note.
-        self._plus_overlay = PlusOverlay(self._on_plus_clicked)
+        # Always wire the lookup callback and let the config decide visibility, so Settings can
+        # toggle the magnifier without rebuilding the overlay.
+        self._plus_overlay = ActionOverlay(
+            self._on_plus_clicked, on_lookup=self._on_lookup_clicked
+        )
+        self._plus_overlay.set_lookup_enabled(self._config.lookup_enabled)
+        # Lookup: omnia's add-on plugin does the searching/triage; this app renders the answer.
+        self._lookup = self._build_lookup_service()
+        self._lookup_panel = LookupPanel(
+            on_add=self._add_pending_capture, on_open_in_anki=self._open_in_anki
+        )
+        # Where the "+" was shown, so the panel opens next to the word you were reading.
+        self._last_gesture_pos: tuple[int, int] = (0, 0)
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
         # The (word, context) captured at gesture time, consumed when the "+" is clicked.
         self._pending_capture: tuple[str, str] | None = None
+        # Context capture reads the frontmost app's accessibility tree, and Chromium/Electron
+        # apps only expose one after they are asked (and take a moment to build it). Warm each
+        # app the first time it comes to the front, so a gesture never races that build-up.
+        self._warmer = AccessibilityWarmer()
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setInterval(1500)
+        self._warm_timer.timeout.connect(self._warm_frontmost)
 
         self._capture_requested.connect(self.capture_and_add)
         self._ocr_requested.connect(self.capture_ocr_and_add)
@@ -135,6 +161,7 @@ class ClipperApp(QObject):
         _warm_macos_trust_cache()  # MUST precede any pynput listener (see the helper's docstring)
         _request_macos_accessibility()  # register + prompt for Accessibility on macOS
         self._tray.show()
+        self._warm_timer.start()  # keep the frontmost app's AX tree ready for context capture
         self._sync_listeners()
 
     def _sync_listeners(self) -> None:
@@ -253,9 +280,13 @@ class ClipperApp(QObject):
             new_config.hotkey != self._config.hotkey
             or new_config.ocr_hotkey != self._config.ocr_hotkey
         )
+        lookup_url_changed = new_config.lookup_url != self._config.lookup_url
         self._config = new_config
         if client_changed:
             self._client = self._build_client()
+        if lookup_url_changed:
+            self._lookup = self._build_lookup_service()
+        self._plus_overlay.set_lookup_enabled(new_config.lookup_enabled)
         # NB: we do NOT restart the keyboard hotkey listeners here — that would SIGTRAP (see
         # _sync_listeners). A changed hotkey string is saved and applies on the next app launch.
         self._sync_listeners()
@@ -312,7 +343,13 @@ class ClipperApp(QObject):
         word = selection.strip()
         context = self._context.resolve(selection)
         self._pending_capture = (word, context)
+        self._last_gesture_pos = (x, y)
+        self._plus_overlay.set_lookup_hint(None, word)  # neutral until the probe answers
         self._plus_overlay.show_at(x, y)
+        if self._config.lookup_enabled:
+            # Cheap existence probe so the magnifier can say "N cards" / "no card yet" BEFORE
+            # it is clicked. Runs off the Qt thread; a failure just leaves the neutral look.
+            self._lookup.probe(word)
 
     def _on_plus_clicked(self) -> None:
         """The floating "+" was clicked: confirm + add the capture taken at gesture time."""
@@ -321,11 +358,64 @@ class ClipperApp(QObject):
         if pending is not None:
             self._confirm_and_add(*pending)
 
+    def _warm_frontmost(self) -> None:
+        """Warm the frontmost app's accessibility tree (once per app), off the main thread.
+
+        Resolving the frontmost app is AppKit, so it happens here on the Qt main thread; only the
+        pid is handed to the warmer, which does the (possibly slow) AX call on its own thread.
+        """
+        self._warmer.ensure(platform_helpers.frontmost_pid())
+
+    def _on_lookup_clicked(self) -> None:
+        """The magnifier was clicked: open the panel (loading) and run the full lookup."""
+        pending = self._pending_capture
+        word = pending[0] if pending else ""
+        if not word:
+            return
+        self._lookup_panel.show_loading(word, self._last_gesture_pos)
+        self._lookup.lookup(word)
+
+    def _on_lookup_probed(self, word: str, count: int) -> None:
+        """Reflect the probe on the magnifier (count badge, or a muted "no card yet")."""
+        pending = self._pending_capture
+        if not pending or pending[0] != word:
+            return  # the user moved on; don't relabel a pill for a different word
+        self._plus_overlay.set_lookup_hint(None if count < 0 else count, word)
+
+    def _on_lookup_finished(self, word: str, view: object) -> None:
+        self._lookup_panel.show_result(view, self._last_gesture_pos)
+
+    def _on_lookup_failed(self, word: str, message: str) -> None:
+        self._lookup_panel.show_error(word, message, self._last_gesture_pos)
+
+    def _add_pending_capture(self) -> None:
+        """"Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""
+        pending = self._pending_capture
+        self._pending_capture = None
+        if pending is not None:
+            self._confirm_and_add(*pending)
+
+    def _open_in_anki(self, note_id: int) -> None:
+        """Reveal the note in Anki's browser (best-effort; a failure just toasts)."""
+        try:
+            self._client.gui_browse(f"nid:{note_id}")
+        except Exception as exc:
+            self._tray.show_message(_TOAST_TITLE, f"Could not open Anki: {exc}")
+
     def _shutdown(self) -> None:
         """Release the OS hotkey + mouse hooks on quit."""
+        self._warm_timer.stop()
         self._hotkey.stop()
         self._ocr_hotkey.stop()
         self._mouse_watcher.stop()
+
+    def _build_lookup_service(self) -> LookupService:
+        """Construct the lookup service for the configured URL and wire its signals."""
+        service = LookupService(LookupClient(self._config.lookup_url))
+        service.finished.connect(self._on_lookup_finished)
+        service.failed.connect(self._on_lookup_failed)
+        service.probed.connect(self._on_lookup_probed)
+        return service
 
     def _build_client(self) -> AnkiConnectClient:
         """Construct an AnkiConnect client from the current config."""

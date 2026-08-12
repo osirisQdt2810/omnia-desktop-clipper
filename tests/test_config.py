@@ -157,3 +157,29 @@ class TestConfigDir:
     def test_linux_dir_defaults_to_dot_config(self, tmp_path) -> None:
         result = config_dir("linux", {}, home=tmp_path)
         assert result == tmp_path / ".config" / "omnia-desktop-clipper"
+
+
+class TestLookupSettings:
+    """The lookup toggle + service URL survive a save/load round-trip."""
+
+    def test_defaults(self) -> None:
+        config = Config()
+        assert config.lookup_enabled is True
+        assert config.lookup_url == "http://127.0.0.1:8766"
+
+    def test_from_dict_reads_both(self) -> None:
+        config = Config.from_dict(
+            {"lookup_enabled": False, "lookup_url": "http://127.0.0.1:9000"}
+        )
+        assert config.lookup_enabled is False
+        assert config.lookup_url == "http://127.0.0.1:9000"
+
+    def test_missing_keys_fall_back_to_defaults(self) -> None:
+        # An older config.json written before the lookup existed must still load.
+        config = Config.from_dict({"deck_name": "D"})
+        assert config.lookup_enabled is True
+        assert config.lookup_url == "http://127.0.0.1:8766"
+
+    def test_round_trips_through_to_dict(self) -> None:
+        original = Config(lookup_enabled=False, lookup_url="http://h:1")
+        assert Config.from_dict(original.to_dict()) == original
