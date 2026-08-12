@@ -27,6 +27,10 @@ class Palette:
     accent: str
     chip_bg: str
     shadow: str
+    # The surface colour as a plain hex, so translucent variants can be mixed from it.
+    surface_rgb: str
+    # Same for the muted colour (field captions soften it further).
+    muted_rgb: str
 
 
 LIGHT = Palette(
@@ -38,6 +42,8 @@ LIGHT = Palette(
     accent=ACCENT,
     chip_bg="#eef2f7",
     shadow="rgba(0, 0, 0, 60)",
+    surface_rgb="#f6f7f9",
+    muted_rgb="#6b727c",
 )
 
 DARK = Palette(
@@ -49,6 +55,8 @@ DARK = Palette(
     accent="#5aa0ff",
     chip_bg="#2e333c",
     shadow="rgba(0, 0, 0, 140)",
+    surface_rgb="#262a31",
+    muted_rgb="#9aa1ac",
 )
 
 # Card-state accent colours (new / learning / review / relearning), used for the state pill.
@@ -90,13 +98,72 @@ def state_color(state: str) -> str:
     return STATE_COLORS.get(state, STATE_COLORS["review"])
 
 
+def rgba(hex_color: str, alpha: float) -> str:
+    """Public alias of :func:`_rgba`, for widgets that build a gradient inline."""
+    return _rgba(hex_color, alpha)
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    """``#rrggbb`` -> ``rgba(r, g, b, a)`` for translucent QSS fills."""
+    value = hex_color.lstrip("#")
+    r, g, b = (int(value[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+
 def stylesheet(colors: Palette) -> str:
     """Build the lookup panel's QSS from ``colors``.
 
     One sheet for the whole panel: object names (``#lookupRoot``, ``#lookupTitle``, …) keep the
     widget code free of inline styling.
+
+    The three bands are styled to look DIFFERENT on purpose. They previously shared the same
+    pill-row shape, so the panel read as two identical stripes and the eye had no hierarchy:
+
+    * the header is a soft gradient wash carrying the word and its state;
+    * the switcher is a segmented control — connected, filled-when-active;
+    * each field is a translucent card with a thin accent spine, lifting on hover.
     """
+    accent_soft = _rgba(colors.accent, 0.10)
+    accent_edge = _rgba(colors.accent, 0.22)
+    field_bg = _rgba(colors.surface_rgb, 0.55)
+    field_bg_hover = _rgba(colors.surface_rgb, 0.95)
     return f"""
+    #headerBand {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+            stop:0 {accent_soft}, stop:1 rgba(0, 0, 0, 0));
+        border: 1px solid {accent_edge};
+        border-radius: 10px;
+    }}
+    #fieldCard {{
+        background: {field_bg};
+        border: 1px solid {colors.border};
+        border-left: 3px solid {accent_edge};
+        border-radius: 8px;
+    }}
+    #fieldCard:hover {{
+        background: {field_bg_hover};
+        border-left: 3px solid {colors.accent};
+    }}
+    #segment {{
+        background: transparent;
+        color: {colors.muted};
+        border: 1px solid {colors.border};
+        border-radius: 8px;
+        padding: 4px 12px;
+        font-size: 12px;
+    }}
+    #segment:hover {{ color: {colors.text}; border-color: {colors.accent}; }}
+    #segmentActive {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {colors.accent}, stop:1 {_rgba(colors.accent, 0.82)});
+        color: white;
+        border: 1px solid {colors.accent};
+        border-radius: 8px;
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    #metaLine {{ font-size: 11px; color: {colors.muted}; }}
     #lookupRoot {{
         background: {colors.bg};
         border: 1px solid {colors.border};

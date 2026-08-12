@@ -183,3 +183,15 @@ class TestLookupSettings:
     def test_round_trips_through_to_dict(self) -> None:
         original = Config(lookup_enabled=False, lookup_url="http://h:1")
         assert Config.from_dict(original.to_dict()) == original
+
+
+class TestBrowserSkip:
+    def test_defaults_to_standing_aside_in_browsers(self) -> None:
+        assert Config().skip_in_browsers is True
+
+    def test_round_trips(self) -> None:
+        original = Config(skip_in_browsers=False)
+        assert Config.from_dict(original.to_dict()) == original
+
+    def test_older_config_without_the_key_still_loads(self) -> None:
+        assert Config.from_dict({"deck_name": "D"}).skip_in_browsers is True
