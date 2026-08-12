@@ -175,19 +175,14 @@ def stylesheet(colors: Palette) -> str:
         font-weight: 600;
         color: {colors.text};
     }}
-    #lookupSubtitle, #lookupHint {{
+    #lookupSubtitle, #fieldName, #lookupHint {{
         font-size: 11px;
         color: {colors.muted};
     }}
-    /* The label is a quiet caption, the value is the content. They used to sit at 11px vs 13px
-       with the same weight family, so the pair read as one lump; widening that gap is what makes
-       a field scannable. */
     #fieldName {{
-        font-size: 9px;
-        font-weight: 700;
+        font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 1.1px;
-        color: {_rgba(colors.muted_rgb, 0.85)};
+        letter-spacing: 0.4px;
     }}
     #fieldText {{ font-size: 13px; color: {colors.text}; }}
     #chip {{

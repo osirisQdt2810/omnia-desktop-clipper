@@ -46,6 +46,7 @@ _SCREEN_MARGIN = 12
 # Thumbnails are bounded: a full-size card image would push the panel past the screen edge.
 _FADE_MS = 130
 _FADE_HEIGHT = 26  # px of gradient at the bottom of a scrolling field list
+_CAPTION_GAP = 7  # px between a field's caption and its value
 _IMAGE_MAX_WIDTH = 360
 _IMAGE_MAX_HEIGHT = 260
 
@@ -421,7 +422,9 @@ class LookupPanel(QWidget):
         holder.setObjectName("fieldCard")
         layout = QVBoxLayout(holder)
         layout.setContentsMargins(10, 8, 10, 9)
-        layout.setSpacing(3)
+        # The caption and its value need visible air between them; sitting nearly flush made the
+        # pair read as one block.
+        layout.setSpacing(_CAPTION_GAP)
         name = QLabel(field.name)
         name.setObjectName("fieldName")
         layout.addWidget(name)
