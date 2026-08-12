@@ -31,9 +31,12 @@ from .capture.context import (
 from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .config import Config
 from .hotkey import GlobalHotkey
+from .lookup.client import LookupClient
+from .lookup.service import LookupService
 from .mouse_watcher import GlobalMouseWatcher
 from .ui.icon import plus_icon
-from .ui.plus_overlay import PlusOverlay
+from .ui.action_overlay import ActionOverlay
+from .ui.lookup_panel import LookupPanel
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
 from .ui.settings import SettingsDialog
@@ -124,7 +127,20 @@ class ClipperApp(QObject):
         self._ocr_hotkey = GlobalHotkey(self._config.ocr_hotkey, self._on_ocr_hotkey)
         # Floating "+": a global mouse hook detects a select gesture; we capture the selection
         # THEN (source app still focused) and show the "+"; clicking it adds the captured note.
-        self._plus_overlay = PlusOverlay(self._on_plus_clicked)
+        self._plus_overlay = ActionOverlay(
+            self._on_plus_clicked,
+            on_lookup=self._on_lookup_clicked if self._config.lookup_enabled else None,
+        )
+        # Lookup: omnia's add-on plugin does the searching/triage; this app renders the answer.
+        self._lookup = LookupService(LookupClient(self._config.lookup_url))
+        self._lookup.finished.connect(self._on_lookup_finished)
+        self._lookup.failed.connect(self._on_lookup_failed)
+        self._lookup.probed.connect(self._on_lookup_probed)
+        self._lookup_panel = LookupPanel(
+            on_add=self._add_pending_capture, on_open_in_anki=self._open_in_anki
+        )
+        # Where the "+" was shown, so the panel opens next to the word you were reading.
+        self._last_gesture_pos: tuple[int, int] = (0, 0)
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
         # The (word, context) captured at gesture time, consumed when the "+" is clicked.
         self._pending_capture: tuple[str, str] | None = None
@@ -324,7 +340,13 @@ class ClipperApp(QObject):
         word = selection.strip()
         context = self._context.resolve(selection)
         self._pending_capture = (word, context)
+        self._last_gesture_pos = (x, y)
+        self._plus_overlay.set_lookup_hint(None, word)  # neutral until the probe answers
         self._plus_overlay.show_at(x, y)
+        if self._config.lookup_enabled:
+            # Cheap existence probe so the magnifier can say "N cards" / "no card yet" BEFORE
+            # it is clicked. Runs off the Qt thread; a failure just leaves the neutral look.
+            self._lookup.probe(word)
 
     def _on_plus_clicked(self) -> None:
         """The floating "+" was clicked: confirm + add the capture taken at gesture time."""
@@ -340,6 +362,42 @@ class ClipperApp(QObject):
         pid is handed to the warmer, which does the (possibly slow) AX call on its own thread.
         """
         self._warmer.ensure(platform_helpers.frontmost_pid())
+
+    def _on_lookup_clicked(self) -> None:
+        """The magnifier was clicked: open the panel (loading) and run the full lookup."""
+        pending = self._pending_capture
+        word = pending[0] if pending else ""
+        if not word:
+            return
+        self._lookup_panel.show_loading(word, self._last_gesture_pos)
+        self._lookup.lookup(word)
+
+    def _on_lookup_probed(self, word: str, count: int) -> None:
+        """Reflect the probe on the magnifier (count badge, or a muted "no card yet")."""
+        pending = self._pending_capture
+        if not pending or pending[0] != word:
+            return  # the user moved on; don't relabel a pill for a different word
+        self._plus_overlay.set_lookup_hint(None if count < 0 else count, word)
+
+    def _on_lookup_finished(self, word: str, view: object) -> None:
+        self._lookup_panel.show_result(view, self._last_gesture_pos)
+
+    def _on_lookup_failed(self, word: str, message: str) -> None:
+        self._lookup_panel.show_error(word, message, self._last_gesture_pos)
+
+    def _add_pending_capture(self) -> None:
+        """"Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""
+        pending = self._pending_capture
+        self._pending_capture = None
+        if pending is not None:
+            self._confirm_and_add(*pending)
+
+    def _open_in_anki(self, note_id: int) -> None:
+        """Reveal the note in Anki's browser (best-effort; a failure just toasts)."""
+        try:
+            self._client.gui_browse(f"nid:{note_id}")
+        except Exception as exc:
+            self._tray.show_message(_TOAST_TITLE, f"Could not open Anki: {exc}")
 
     def _shutdown(self) -> None:
         """Release the OS hotkey + mouse hooks on quit."""
