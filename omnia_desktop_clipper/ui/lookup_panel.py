@@ -61,6 +61,18 @@ def _state_pill(state: str, colors: theme.Palette) -> QLabel:
     return label
 
 
+def _leaded(text: str) -> str:
+    """Wrap ``text`` so the label renders with real line spacing.
+
+    Qt style sheets have no ``line-height`` for a ``QLabel``, and the default leading makes
+    wrapped prose look cramped and crude. A rich-text wrapper is the only way to set it, so the
+    text is escaped and put inside a div that carries the leading.
+    """
+    from html import escape
+
+    return f'<div style="line-height:148%">{escape(text)}</div>'
+
+
 def _chip(text: str) -> QLabel:
     """A neutral metadata chip (deck, tag, interval, …)."""
     label = QLabel(text)
@@ -358,8 +370,6 @@ class LookupPanel(QWidget):
         layout.setSpacing(9)
         for field in card.fields:
             layout.addWidget(self._field_block(field))
-        if card.tags:
-            layout.addWidget(self._tags_block(card.tags))
 
         area = QScrollArea()
         area.setWidget(inner)
@@ -416,9 +426,10 @@ class LookupPanel(QWidget):
         name.setObjectName("fieldName")
         layout.addWidget(name)
         if field.text:
-            value = QLabel(field.text)
+            value = QLabel(_leaded(field.text))
             value.setObjectName("fieldText")
             value.setWordWrap(True)
+            value.setTextFormat(Qt.TextFormat.RichText)
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(value)
         else:
@@ -532,23 +543,6 @@ class LookupPanel(QWidget):
             label.setText("Image unavailable")
             label.setObjectName("lookupSubtitle")
         layout.addWidget(label)
-
-    @staticmethod
-    def _tags_block(tags: tuple[str, ...]) -> QWidget:
-        """Tags rendered as one more field card, so the list ends evenly instead of trailing off."""
-        holder = QFrame()
-        holder.setObjectName("fieldCard")
-        layout = QVBoxLayout(holder)
-        layout.setContentsMargins(10, 8, 10, 9)
-        layout.setSpacing(3)
-        name = QLabel("Tags")
-        name.setObjectName("fieldName")
-        layout.addWidget(name)
-        value = QLabel(", ".join(tags))
-        value.setObjectName("fieldText")
-        value.setWordWrap(True)
-        layout.addWidget(value)
-        return holder
 
     # -- presentation --------------------------------------------------------------------
 

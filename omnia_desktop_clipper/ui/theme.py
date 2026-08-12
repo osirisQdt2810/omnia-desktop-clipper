@@ -29,6 +29,8 @@ class Palette:
     shadow: str
     # The surface colour as a plain hex, so translucent variants can be mixed from it.
     surface_rgb: str
+    # Same for the muted colour (field captions soften it further).
+    muted_rgb: str
 
 
 LIGHT = Palette(
@@ -41,6 +43,7 @@ LIGHT = Palette(
     chip_bg="#eef2f7",
     shadow="rgba(0, 0, 0, 60)",
     surface_rgb="#f6f7f9",
+    muted_rgb="#6b727c",
 )
 
 DARK = Palette(
@@ -53,6 +56,7 @@ DARK = Palette(
     chip_bg="#2e333c",
     shadow="rgba(0, 0, 0, 140)",
     surface_rgb="#262a31",
+    muted_rgb="#9aa1ac",
 )
 
 # Card-state accent colours (new / learning / review / relearning), used for the state pill.
@@ -171,14 +175,19 @@ def stylesheet(colors: Palette) -> str:
         font-weight: 600;
         color: {colors.text};
     }}
-    #lookupSubtitle, #fieldName, #lookupHint {{
+    #lookupSubtitle, #lookupHint {{
         font-size: 11px;
         color: {colors.muted};
     }}
+    /* The label is a quiet caption, the value is the content. They used to sit at 11px vs 13px
+       with the same weight family, so the pair read as one lump; widening that gap is what makes
+       a field scannable. */
     #fieldName {{
-        font-weight: 600;
+        font-size: 9px;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.4px;
+        letter-spacing: 1.1px;
+        color: {_rgba(colors.muted_rgb, 0.85)};
     }}
     #fieldText {{ font-size: 13px; color: {colors.text}; }}
     #chip {{

@@ -81,6 +81,15 @@ class SettingsDialog(QDialog):
             "types are searchable and which fields are worth showing.\n"
             "Off = the overlay is just the “+”, exactly as before."
         )
+        self._skip_browsers_check = QCheckBox(
+            "Don't show the + in browsers (the Omnia web extension handles those)"
+        )
+        self._skip_browsers_check.setChecked(config.skip_in_browsers)
+        self._skip_browsers_check.setToolTip(
+            "In a browser the web clipper reads the page itself, so it captures the exact "
+            "sentence, the whole paragraph and the page URL — more than this app can.\n"
+            "Leaving this on also avoids two “+” buttons appearing at once."
+        )
         self._lookup_url_edit = QLineEdit(config.lookup_url)
         self._lookup_url_edit.setToolTip(
             "Where the Omnia add-on's lookup service listens (loopback only). Change this only "
@@ -108,6 +117,7 @@ class SettingsDialog(QDialog):
         form.addRow("OCR hotkey", self._ocr_hotkey_edit)
         form.addRow(self._autogen_check)
         form.addRow(self._plus_overlay_check)
+        form.addRow(self._skip_browsers_check)
         form.addRow(self._lookup_check)
         form.addRow("Lookup service URL", self._lookup_url_edit)
 
@@ -199,6 +209,7 @@ class SettingsDialog(QDialog):
             ocr_hotkey=self._ocr_hotkey_edit.text().strip(),
             plus_overlay=self._plus_overlay_check.isChecked(),
             enabled=self._enabled_check.isChecked(),
+            skip_in_browsers=self._skip_browsers_check.isChecked(),
             lookup_enabled=self._lookup_check.isChecked(),
             lookup_url=self._lookup_url_edit.text().strip(),
         )

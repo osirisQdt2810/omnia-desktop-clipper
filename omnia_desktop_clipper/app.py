@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import QApplication, QDialog
 from . import config as config_module
 from . import platform as platform_helpers
 from .anki import AnkiConnectClient, AnkiConnectError
+from .browsers import is_browser
 from .capture.base import SelectionCapture
 from .capture.clipboard import build_clipboard_capture
 from .capture.context import (
@@ -339,6 +340,13 @@ class ClipperApp(QObject):
         is not blocked.
         """
         if not self._config.enabled:  # master switch off
+            return
+        if self._config.skip_in_browsers and is_browser(
+            platform_helpers.frontmost_bundle_id()
+        ):
+            # The web clipper owns browsers: it reads the DOM, so it gets the exact sentence AND
+            # the whole paragraph plus the page URL — more than accessibility can give here — and
+            # showing both would put two "+" buttons on screen.
             return
         try:
             selection = self._capture.capture()

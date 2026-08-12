@@ -68,6 +68,23 @@ def frontmost_pid() -> int | None:
         return None
 
 
+def frontmost_bundle_id() -> str:
+    """Return the frontmost app's bundle identifier, or ``""`` if unavailable.
+
+    macOS only (AppKit ``NSWorkspace``); used to tell a browser apart from every other app.
+    Must be called on the main thread.
+    """
+    if sys.platform != "darwin":
+        return ""
+    try:
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return "" if app is None else str(app.bundleIdentifier() or "")
+    except Exception:
+        return ""
+
+
 def cursor_pos() -> tuple[int, int]:
     """Return the global mouse-cursor position as ``(x, y)`` in screen pixels."""
     from PyQt6.QtGui import QCursor
