@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt
 from PyQt6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractScrollArea,
@@ -44,6 +44,8 @@ _MAX_HEIGHT = 560
 _CURSOR_OFFSET = 16
 _SCREEN_MARGIN = 12
 # Thumbnails are bounded: a full-size card image would push the panel past the screen edge.
+_FADE_MS = 130
+_FADE_HEIGHT = 26  # px of gradient at the bottom of a scrolling field list
 _IMAGE_MAX_WIDTH = 360
 _IMAGE_MAX_HEIGHT = 260
 
@@ -95,6 +97,8 @@ class LookupPanel(QWidget):
         self._word = ""
         # The whole result plus which of its notes is on screen, so the switcher can re-render
         # a different note without asking omnia again.
+        # Set when a scrolling field list is built; repositions its bottom gradient.
+        self._reposition_fade: Optional[Callable[[], None]] = None
         self._view: Optional[LookupView] = None
         self._index = 0
         self._position = (0, 0)
@@ -118,6 +122,15 @@ class LookupPanel(QWidget):
 
         # Esc closes — this panel takes focus, so it must be dismissable from the keyboard.
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.hide)
+
+        # A short fade so the panel arrives instead of snapping into place. Kept on the WINDOW
+        # opacity (not a graphics effect) because effects on a translucent frameless window
+        # render badly on macOS.
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(_FADE_MS)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt's API
         """Dismiss when focus leaves: a popover the user clicked away from must not linger.
@@ -161,11 +174,13 @@ class LookupPanel(QWidget):
             return
         self._index = index
         self._render_cards(self._view, index)
-        self._present(self._position)
+        self._present(self._position, fresh=False)
 
     # -- rendering -----------------------------------------------------------------------
 
     def _clear(self) -> theme.Palette:
+        # The old content owns the previous fade; drop the handle with it.
+        self._reposition_fade = None
         """Install a fresh content widget, re-apply the appearance, and return its palette."""
         if self._content is not None:
             self._shell.removeWidget(self._content)
@@ -221,23 +236,11 @@ class LookupPanel(QWidget):
         colors = self._clear()
         card = view.cards[index]
 
-        # Title row: the word + its scheduling state, the two things read first.
-        title_row = QHBoxLayout()
-        title = QLabel(card.title or view.word)
-        title.setObjectName("lookupTitle")
-        title.setWordWrap(True)
-        title_row.addWidget(title, 1)
-        title_row.addWidget(_state_pill(card.state, colors), 0, Qt.AlignmentFlag.AlignTop)
-        title_holder = QWidget()
-        title_holder.setLayout(title_row)
-        self._body.addWidget(title_holder)
-
-        self._body.addWidget(self._meta_row(card))
+        self._body.addWidget(self._header_band(card, view, colors))
         if len(view.cards) > 1:
             # More than one note matched: let the user step between them instead of only ever
             # seeing the top hit (the right note is not always the highest-ranked one).
             self._body.addWidget(self._switcher(view, index, colors))
-        self._body.addWidget(self._separator(colors))
         self._body.addWidget(self._fields_area(card), 1)
 
         if self._on_open_in_anki is not None:
@@ -252,26 +255,67 @@ class LookupPanel(QWidget):
             holder.setLayout(row)
             self._body.addWidget(holder)
 
+    def _header_band(
+        self, card: LookupCardView, view: LookupView, colors: theme.Palette
+    ) -> QWidget:
+        """The word, its state, and its scheduling as ONE band.
+
+        Deck/interval/reps/lapses used to be a row of chips, which made the header and the note
+        switcher two near-identical pill stripes with no hierarchy between them. They are now a
+        single quiet line under the word, so the eye reads: word -> state -> details.
+        """
+        band = QFrame()
+        band.setObjectName("headerBand")
+        outer = QVBoxLayout(band)
+        outer.setContentsMargins(14, 12, 14, 12)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        title = QLabel(card.title or view.word)
+        title.setObjectName("lookupTitle")
+        title.setWordWrap(True)
+        top.addWidget(title, 1)
+        top.addWidget(_state_pill(card.state, colors), 0, Qt.AlignmentFlag.AlignTop)
+        holder = QWidget()
+        holder.setLayout(top)
+        outer.addWidget(holder)
+
+        bits = []
+        if card.interval_days:
+            bits.append(f"{card.interval_days}d interval")
+        if card.reps:
+            bits.append(f"{card.reps} reviews")
+        if card.lapses:
+            bits.append(f"{card.lapses} lapses")
+        if card.deck:
+            bits.append(card.deck.split("::")[-1])
+        if bits:
+            meta = QLabel("  ·  ".join(bits))
+            meta.setObjectName("metaLine")
+            meta.setWordWrap(True)
+            if card.deck:
+                meta.setToolTip(card.deck)
+            outer.addWidget(meta)
+        return band
+
     def _switcher(self, view: LookupView, index: int, colors: theme.Palette) -> QWidget:
         """One small button per matched note; the current one is highlighted."""
-        holder, row = flow_widget(spacing=6)
+        holder, row = flow_widget(spacing=4)
         for position, card in enumerate(view.cards):
             label = card.title or card.note_type or f"note {card.note_id}"
             button = QPushButton(label if len(label) <= 22 else label[:21] + "…")
-            button.setObjectName("lookupAction")
+            # Segmented control, not chips: the active one is filled, the rest are outlined, so
+            # this band cannot be mistaken for the header's information line.
+            button.setObjectName("segmentActive" if position == index else "segment")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setToolTip(f"{card.note_type or 'note'} — {card.deck or 'no deck'}")
-            if position == index:
-                button.setStyleSheet(
-                    f"QPushButton {{ background: {colors.accent}; color: white;"
-                    f" border: 1px solid {colors.accent}; border-radius: 7px;"
-                    f" padding: 4px 10px; font-size: 12px; }}"
-                )
-            else:
+            if position != index:
                 button.clicked.connect(
                     lambda _checked=False, target=position: self._switch_to(target)
                 )
             row.addWidget(button)
+        _ = colors
         return holder
 
     def _meta_row(self, card: LookupCardView) -> QWidget:
@@ -325,14 +369,49 @@ class LookupPanel(QWidget):
         # Size to the fields, so a short card is a short panel instead of a tall one with dead
         # space; the panel's own max height is what turns a long card into a scrolling one.
         area.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        self._install_bottom_fade(area)
         return area
+
+    def _install_bottom_fade(self, area: QScrollArea) -> None:
+        """Fade the last visible field into the background when the list scrolls.
+
+        A long note is clipped mid-card at the scroll boundary, which reads as broken rather
+        than as "there is more". A gradient to the panel's own background says it softly, and
+        it hides itself when everything already fits.
+        """
+        colors = theme.palette()
+        fade = QFrame(area.viewport())
+        fade.setObjectName("scrollFade")
+        fade.setFixedHeight(_FADE_HEIGHT)
+        fade.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        fade.setStyleSheet(
+            "QFrame#scrollFade { border: none; background: qlineargradient("
+            "x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {theme.rgba(colors.bg, 0.0)}, stop:1 {theme.rgba(colors.bg, 1.0)}); }}"
+            .replace("}}", "}")
+        )
+
+        def reposition() -> None:
+            viewport = area.viewport()
+            fade.setGeometry(
+                0, viewport.height() - _FADE_HEIGHT, viewport.width(), _FADE_HEIGHT
+            )
+            bar = area.verticalScrollBar()
+            # Nothing to scroll, or already at the end -> no "more below" to hint at.
+            fade.setVisible(bar.maximum() > 0 and bar.value() < bar.maximum() - 2)
+            fade.raise_()
+
+        area.verticalScrollBar().valueChanged.connect(reposition)
+        area.verticalScrollBar().rangeChanged.connect(reposition)
+        self._reposition_fade = reposition
 
     def _field_block(self, field) -> QWidget:
         """One field: its name as a small caps label above the value (or a media badge)."""
-        holder = QWidget()
+        holder = QFrame()
+        holder.setObjectName("fieldCard")
         layout = QVBoxLayout(holder)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 8, 10, 9)
+        layout.setSpacing(3)
         name = QLabel(field.name)
         name.setObjectName("fieldName")
         layout.addWidget(name)
@@ -456,10 +535,12 @@ class LookupPanel(QWidget):
 
     @staticmethod
     def _tags_block(tags: tuple[str, ...]) -> QWidget:
-        holder = QWidget()
+        """Tags rendered as one more field card, so the list ends evenly instead of trailing off."""
+        holder = QFrame()
+        holder.setObjectName("fieldCard")
         layout = QVBoxLayout(holder)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 8, 10, 9)
+        layout.setSpacing(3)
         name = QLabel("Tags")
         name.setObjectName("fieldName")
         layout.addWidget(name)
@@ -471,8 +552,15 @@ class LookupPanel(QWidget):
 
     # -- presentation --------------------------------------------------------------------
 
-    def _present(self, position: tuple[int, int]) -> None:
-        """Size to content, keep the panel fully on screen, show it and take focus."""
+    def _present(self, position: tuple[int, int], *, fresh: bool = True) -> None:
+        """Size to content, keep the panel fully on screen, show it and take focus.
+
+        Args:
+            position: Where the gesture happened; the panel anchors beside it.
+            fresh: Whether this is a new appearance (fade in) rather than a re-render of an
+                already-visible panel (no fade — re-fading on every note switch would flicker).
+        """
+        fresh = fresh and not self.isVisible()
         # Show the freshly built content BEFORE measuring. Widgets added to an already-visible
         # parent are not shown automatically, and QLayout ignores hidden children when computing
         # a size hint — which collapsed every state after the first to its margins alone.
@@ -492,9 +580,21 @@ class LookupPanel(QWidget):
         self.setFixedHeight(height)
         self.move(*self._anchor(position, height))
         self.raise_()
+        self._play_fade(fresh)
+        if self._reposition_fade is not None:
+            self._reposition_fade()
         # Unlike the overlay, this panel IS meant to take focus (scroll + Esc).
         promote_over_all_apps(self, activate=True)
         self.activateWindow()
+
+    def _play_fade(self, fresh: bool) -> None:
+        """Fade the panel in on a fresh appearance; leave it opaque on a re-render."""
+        if not fresh:
+            self.setWindowOpacity(1.0)
+            return
+        self._fade.stop()
+        self.setWindowOpacity(0.0)
+        self._fade.start()
 
     def _anchor(self, position: tuple[int, int], height: int) -> tuple[int, int]:
         """Place near ``position``, flipping/clamping so the panel stays on screen."""
