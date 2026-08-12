@@ -71,7 +71,10 @@ def _leaded(text: str) -> str:
     """
     from html import escape
 
-    return f'<div style="line-height:148%">{escape(text)}</div>'
+    # Newlines are meaningful: omnia keeps the author's <br> structure (a "Phrasal Verb" field
+    # is one entry per line), and rich text would otherwise swallow them.
+    body = escape(text).replace("\n", "<br>")
+    return f'<div style="line-height:148%">{body}</div>'
 
 
 def _chip(text: str) -> QLabel:
