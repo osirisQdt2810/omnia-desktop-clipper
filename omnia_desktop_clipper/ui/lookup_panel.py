@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PyQt6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractScrollArea,
     QFrame,
@@ -42,6 +42,9 @@ _WIDTH = 420
 _MAX_HEIGHT = 560
 _CURSOR_OFFSET = 16
 _SCREEN_MARGIN = 12
+# Thumbnails are bounded: a full-size card image would push the panel past the screen edge.
+_IMAGE_MAX_WIDTH = 360
+_IMAGE_MAX_HEIGHT = 260
 
 
 def _state_pill(state: str, colors: theme.Palette) -> QLabel:
@@ -69,12 +72,15 @@ class LookupPanel(QWidget):
         self,
         on_add: Optional[Callable[[], None]] = None,
         on_open_in_anki: Optional[Callable[[int], None]] = None,
+        request_media: Optional[Callable[[str, Callable[[object], None]], None]] = None,
     ) -> None:
         """Build the (reusable, singleton) panel.
 
         Args:
             on_add: Called when the user chooses to add the word from the "not found" state.
             on_open_in_anki: Called with a note id to reveal it in Anki's browser.
+            request_media: ``(filename, on_ready)`` fetching a media file OFF the UI thread and
+                calling ``on_ready(bytes | None)`` back on it. ``None`` disables image viewing.
         """
         super().__init__(
             None,
@@ -84,7 +90,13 @@ class LookupPanel(QWidget):
         )
         self._on_add = on_add
         self._on_open_in_anki = on_open_in_anki
+        self._request_media = request_media
         self._word = ""
+        # The whole result plus which of its notes is on screen, so the switcher can re-render
+        # a different note without asking omnia again.
+        self._view: Optional[LookupView] = None
+        self._index = 0
+        self._position = (0, 0)
         self.setFixedWidth(_WIDTH)
 
         outer = QVBoxLayout(self)
@@ -133,11 +145,22 @@ class LookupPanel(QWidget):
     def show_result(self, view: LookupView, position: tuple[int, int]) -> None:
         """Show the lookup outcome: the matching card(s), or a clear "not found" state."""
         self._word = view.word
+        self._view = view
+        self._index = 0
+        self._position = position
         if not view.found:
             self._render_not_found(view.word)
         else:
-            self._render_cards(view)
+            self._render_cards(view, 0)
         self._present(position)
+
+    def _switch_to(self, index: int) -> None:
+        """Show another matched note without re-querying (the result is already in hand)."""
+        if self._view is None or not (0 <= index < len(self._view.cards)):
+            return
+        self._index = index
+        self._render_cards(self._view, index)
+        self._present(self._position)
 
     # -- rendering -----------------------------------------------------------------------
 
@@ -193,9 +216,9 @@ class LookupPanel(QWidget):
             holder.setLayout(row)
             self._body.addWidget(holder)
 
-    def _render_cards(self, view: LookupView) -> None:
+    def _render_cards(self, view: LookupView, index: int = 0) -> None:
         colors = self._clear()
-        card = view.cards[0]
+        card = view.cards[index]
 
         # Title row: the word + its scheduling state, the two things read first.
         title_row = QHBoxLayout()
@@ -208,7 +231,11 @@ class LookupPanel(QWidget):
         title_holder.setLayout(title_row)
         self._body.addWidget(title_holder)
 
-        self._body.addWidget(self._meta_row(card, len(view.cards)))
+        self._body.addWidget(self._meta_row(card))
+        if len(view.cards) > 1:
+            # More than one note matched: let the user step between them instead of only ever
+            # seeing the top hit (the right note is not always the highest-ranked one).
+            self._body.addWidget(self._switcher(view, index, colors))
         self._body.addWidget(self._separator(colors))
         self._body.addWidget(self._fields_area(card), 1)
 
@@ -224,7 +251,29 @@ class LookupPanel(QWidget):
             holder.setLayout(row)
             self._body.addWidget(holder)
 
-    def _meta_row(self, card: LookupCardView, total: int) -> QWidget:
+    def _switcher(self, view: LookupView, index: int, colors: theme.Palette) -> QWidget:
+        """One small button per matched note; the current one is highlighted."""
+        holder, row = flow_widget(spacing=6)
+        for position, card in enumerate(view.cards):
+            label = card.title or card.note_type or f"note {card.note_id}"
+            button = QPushButton(label if len(label) <= 22 else label[:21] + "…")
+            button.setObjectName("lookupAction")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(f"{card.note_type or 'note'} — {card.deck or 'no deck'}")
+            if position == index:
+                button.setStyleSheet(
+                    f"QPushButton {{ background: {colors.accent}; color: white;"
+                    f" border: 1px solid {colors.accent}; border-radius: 7px;"
+                    f" padding: 4px 10px; font-size: 12px; }}"
+                )
+            else:
+                button.clicked.connect(
+                    lambda _checked=False, target=position: self._switch_to(target)
+                )
+            row.addWidget(button)
+        return holder
+
+    def _meta_row(self, card: LookupCardView) -> QWidget:
         """Deck / interval / reps / lapses as compact chips that WRAP rather than clip.
 
         These carry user data (deck names, counts) whose combined width is unpredictable; a
@@ -244,8 +293,8 @@ class LookupPanel(QWidget):
             row.addWidget(_chip(f"{card.reps} reviews"))
         if card.lapses:
             row.addWidget(_chip(f"{card.lapses} lapses"))
-        if total > 1:
-            row.addWidget(_chip(f"+{total - 1} more note(s)"))
+        # No "+N more" chip: the switcher below already names every other match, and saying it
+        # twice just costs a line.
         return holder
 
     @staticmethod
@@ -277,8 +326,7 @@ class LookupPanel(QWidget):
         area.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         return area
 
-    @staticmethod
-    def _field_block(field) -> QWidget:
+    def _field_block(self, field) -> QWidget:
         """One field: its name as a small caps label above the value (or a media badge)."""
         holder = QWidget()
         layout = QVBoxLayout(holder)
@@ -294,16 +342,83 @@ class LookupPanel(QWidget):
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(value)
         else:
-            # Media-only field: say what it holds instead of rendering raw markup.
+            # Media-only field: say what it holds instead of rendering raw markup...
             bits = []
             if field.audio:
                 bits.append(f"🔊 {len(field.audio)} audio")
-            if field.images:
+            if field.images and not self._can_show_images():
                 bits.append(f"🖼 {len(field.images)} image")
-            badge = QLabel("  ".join(bits) or "—")
-            badge.setObjectName("lookupSubtitle")
-            layout.addWidget(badge)
+            if bits:
+                badge = QLabel("  ".join(bits))
+                badge.setObjectName("lookupSubtitle")
+                layout.addWidget(badge)
+            elif not field.images:
+                badge = QLabel("—")
+                badge.setObjectName("lookupSubtitle")
+                layout.addWidget(badge)
+        # ...but an image is worth seeing, so offer to load it (fetching is a round-trip to
+        # Anki, so it happens on demand rather than for every field of every result).
+        if field.images and self._can_show_images():
+            layout.addWidget(self._image_block(field.images))
         return holder
+
+    def _can_show_images(self) -> bool:
+        """Whether a media fetcher was supplied (no fetcher = images stay as a badge)."""
+        return self._request_media is not None
+
+    def _image_block(self, filenames: tuple[str, ...]) -> QWidget:
+        """A 'Show image' button that loads the picture in place when clicked."""
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        button = QPushButton(
+            f"🖼 Show image{'' if len(filenames) == 1 else f's ({len(filenames)})'}"
+        )
+        button.setObjectName("lookupAction")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        def load() -> None:
+            button.setEnabled(False)
+            button.setText("Loading…")
+            remaining = {"count": len(filenames)}
+
+            def done() -> None:
+                remaining["count"] -= 1
+                if remaining["count"] <= 0:
+                    button.hide()
+
+            for name in filenames:
+                self._request_media(
+                    name, lambda data, target=layout, cb=done: (
+                        self._place_image(target, data),
+                        cb(),
+                    )
+                )
+
+        button.clicked.connect(load)
+        return holder
+
+    @staticmethod
+    def _place_image(layout: QVBoxLayout, data: object) -> None:
+        """Render fetched bytes as a bounded thumbnail (or say the image is unavailable)."""
+        label = QLabel()
+        pixmap = QPixmap()
+        if isinstance(data, (bytes, bytearray)) and pixmap.loadFromData(bytes(data)):
+            # Bound it: a full-size card image would blow the panel past the screen.
+            label.setPixmap(
+                pixmap.scaled(
+                    _IMAGE_MAX_WIDTH,
+                    _IMAGE_MAX_HEIGHT,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            label.setText("Image unavailable")
+            label.setObjectName("lookupSubtitle")
+        layout.addWidget(label)
 
     @staticmethod
     def _tags_block(tags: tuple[str, ...]) -> QWidget:

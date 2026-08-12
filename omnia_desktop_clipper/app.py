@@ -97,6 +97,9 @@ class ClipperApp(QObject):
     # Fired from the mouse-watcher thread with the cursor position; the queued connection shows
     # the floating "+" on the Qt main thread.
     _plus_requested = pyqtSignal(int, int)
+    # Fetched media bytes coming back from a worker thread; the queued connection delivers them
+    # to the panel's callback on the Qt main thread (QPixmap is main-thread-only).
+    _media_ready = pyqtSignal(object, object)
 
     def __init__(self, app: QApplication) -> None:
         """Build and wire every component from the loaded config.
@@ -136,7 +139,9 @@ class ClipperApp(QObject):
         # Lookup: omnia's add-on plugin does the searching/triage; this app renders the answer.
         self._lookup = self._build_lookup_service()
         self._lookup_panel = LookupPanel(
-            on_add=self._add_pending_capture, on_open_in_anki=self._open_in_anki
+            on_add=self._add_pending_capture,
+            on_open_in_anki=self._open_in_anki,
+            request_media=self._request_media,
         )
         # Where the "+" was shown, so the panel opens next to the word you were reading.
         self._last_gesture_pos: tuple[int, int] = (0, 0)
@@ -154,6 +159,7 @@ class ClipperApp(QObject):
         self._capture_requested.connect(self.capture_and_add)
         self._ocr_requested.connect(self.capture_ocr_and_add)
         self._plus_requested.connect(self._show_plus)
+        self._media_ready.connect(lambda cb, data: cb(data))
         self._app.aboutToQuit.connect(self._shutdown)
 
     def start(self) -> None:
@@ -396,6 +402,24 @@ class ClipperApp(QObject):
         self._pending_capture = None
         if pending is not None:
             self._confirm_and_add(*pending)
+
+    def _request_media(self, filename: str, on_ready) -> None:
+        """Fetch a media file off the UI thread and hand the bytes back on it.
+
+        The lookup panel needs the bytes to build a QPixmap, which is main-thread-only, so the
+        HTTP round-trip runs on a throwaway thread and the result returns through a queued
+        signal. A failure delivers ``None``, which the panel renders as "Image unavailable".
+        """
+        import threading
+
+        def work() -> None:
+            try:
+                data = self._client.retrieve_media_file(filename)
+            except Exception:
+                data = None
+            self._media_ready.emit(on_ready, data)
+
+        threading.Thread(target=work, name="omnia-media", daemon=True).start()
 
     def _open_in_anki(self, note_id: int) -> None:
         """Reveal the note in Anki's browser (best-effort; a failure just toasts)."""

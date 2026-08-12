@@ -164,6 +164,27 @@ class AnkiConnectClient:
         result = self._invoke("addNote", {"note": note})
         return int(result) if result is not None else 0
 
+    def retrieve_media_file(self, filename: str) -> bytes | None:
+        """Return a collection-media file's bytes (AnkiConnect ``retrieveMediaFile``).
+
+        The lookup panel uses this to show a note's image on demand. AnkiConnect answers with
+        base64, or ``False`` when the file is missing — both are handled here so callers only
+        deal with bytes-or-None.
+
+        Args:
+            filename: The media file name exactly as it appears in the note's HTML.
+        """
+        import base64
+        import binascii
+
+        result = self._invoke("retrieveMediaFile", {"filename": filename})
+        if not isinstance(result, str) or not result:
+            return None
+        try:
+            return base64.b64decode(result)
+        except (binascii.Error, ValueError):
+            return None
+
     def gui_browse(self, query: str) -> None:
         """Open Anki's card browser on ``query`` (AnkiConnect ``guiBrowse``).
 
