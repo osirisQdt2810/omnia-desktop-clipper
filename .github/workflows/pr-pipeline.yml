@@ -1,0 +1,129 @@
+# PR pipeline: tests -> Claude review -> gated auto-merge.
+# Same gate design as osirisQdt2810/omnia: merge needs green tests + an explicit
+# APPROVE verdict + the `automerge` label + an unchanged head commit.
+# A PR that modifies .github/workflows cannot pass review (Claude app
+# anti-tampering) and always needs a manual merge.
+
+name: PR Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    branches: [main]
+
+concurrency:
+  group: pr-pipeline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (macOS)
+    # macOS runner: the dev platform, and the only one where the darwin-marked
+    # pyobjc accessibility dep installs; public repo = free minutes.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 for the widest OCR (rapidocr-onnxruntime) wheel availability — see requirements.txt.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install runtime deps + test runner
+        run: pip install -r requirements.txt pytest
+      - name: Run test suite
+        run: pytest tests/ -q
+
+  review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY != '' }}
+    outputs:
+      verdict: ${{ steps.verdict.outputs.value }}
+    steps:
+      - name: Fail closed when the review credential is missing
+        if: env.HAS_TOKEN != 'true'
+        run: |
+          echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is available. Refusing to skip review while auto-merge is possible."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Review the PR
+        uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            This is the Omnia desktop clipper — a standalone PyQt6 tray app (macOS, Windows,
+            Linux). House rules:
+            - Cross-platform first: platform-specific code (pyobjc/AX, win32, X11) stays behind
+              sys.platform guards and platform-marked deps; the app must import everywhere.
+            - Pure logic separated from Qt glue so tests run headless (the existing tests/
+              suite creates no QApplication — keep it that way).
+            - Never block the Qt event loop on network/OCR/accessibility calls.
+            - Capture/context rules: context resolution order is position -> focused element ->
+              PDF page; never return a sentence that does not contain the selected word; never
+              disturb the user's selection or clipboard beyond the documented synth-copy.
+
+            Inspect the change with `gh pr diff` and `gh pr view`, read surrounding code for
+            context, and judge correctness (a concrete failing scenario for every defect you
+            claim), cross-platform safety, tests, and the rules above.
+
+            Post findings as a single `gh pr comment` (clean PR: short summary; defective PR:
+            each blocking issue with file:line, failure scenario, suggested fix).
+
+            Finally — MANDATORY LAST ACTION — write your one-word verdict:
+              echo APPROVE > "$RUNNER_TEMP/verdict"     # no blocking issues
+              echo BLOCKING > "$RUNNER_TEMP/verdict"    # at least one blocking issue
+            If you write nothing, the pipeline treats the review as BLOCKING.
+          claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(echo:*)"'
+      - name: Publish verdict
+        id: verdict
+        run: |
+          v=$(cat "$RUNNER_TEMP/verdict" 2>/dev/null || echo BLOCKING)
+          if [ "$v" != "APPROVE" ]; then v=BLOCKING; fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Review verdict: $v"
+
+  merge:
+    name: Auto-merge
+    needs: [test, review]
+    if: needs.review.outputs.verdict == 'APPROVE' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge when the automerge label is present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
+          if printf '%s\n' "$labels" | grep -qx automerge; then
+            gh pr merge "$PR" --repo "$REPO" --merge --match-head-commit "$HEAD_SHA"
+            echo "PR #$PR merged at $HEAD_SHA."
+          else
+            echo "No automerge label — review is APPROVE but merging is left to a human."
+          fi
