@@ -17,13 +17,17 @@ concurrency:
 
 jobs:
   test:
-    name: Tests (macOS)
-    # macOS runner: the dev platform, and the only one where the darwin-marked
-    # pyobjc accessibility dep installs; public repo = free minutes.
-    runs-on: macos-latest
+    name: Tests (${{ matrix.os }})
+    # The clipper targets Windows, macOS and Linux — test on all three.
+    # The darwin-marked pyobjc dep installs only on the macOS leg.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
