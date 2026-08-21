@@ -243,7 +243,20 @@ class ClipperApp(QObject):
         self._apply_config(new_config)
 
     def _confirm_and_add(self, word: str, context: str) -> None:
-        """Show the confirm popup prefilled with ``word``/``context``; add on Accept."""
+        """Add the capture, showing the confirm popup first unless ``auto_add`` is on.
+
+        Both capture paths and the lookup panel's "Add to Anki" end here, so the setting
+        governs all of them — which is the point: every one of them starts with a deliberate
+        gesture, so re-asking is the thing being switched off, not a particular button.
+
+        A capture with nothing in it is still dropped. Without the popup there is no Cancel to
+        catch it, and adding an empty note is worse than adding nothing.
+        """
+        if self._config.auto_add:
+            if not word and not context:
+                return
+            self._add_note(word, context)
+            return
         popup = CapturePopup(
             word=word,
             context=context,

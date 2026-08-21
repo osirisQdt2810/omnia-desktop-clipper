@@ -103,6 +103,12 @@ class Config:
     # searchable and which fields are worth showing); this URL is where that plugin listens.
     lookup_enabled: bool = True
     lookup_url: str = "http://127.0.0.1:8766"
+    # Add the captured note straight away instead of opening the confirm popup. ON by default:
+    # the capture gesture (a hotkey, or clicking the "+") is already a deliberate act, so a
+    # dialog whose only content is what you just selected asks you to confirm a decision you
+    # have made. Turn it OFF to get the popup back — worth it while tuning the field map, or
+    # when capturing from a source whose accessibility text needs an edit before it is useful.
+    auto_add: bool = True
     # In a browser the Omnia WEB clipper reads the page's DOM, which yields a better context than
     # this app's accessibility route can (it gets the exact sentence AND the whole paragraph, plus
     # the page URL/title). Running both also puts two "+" buttons on screen. So the desktop "+"
@@ -128,6 +134,10 @@ class Config:
             data: A mapping parsed from JSON. Unknown keys are ignored; missing
                 keys use the dataclass defaults; ``field_map`` is deep-merged.
 
+        Every field is listed below BY HAND. A new option added to the dataclass but not
+        here loads as its default forever — the setting appears to save and then does not,
+        with nothing to explain it. Add both, and a round-trip test that would notice.
+
         Returns:
             A fully-populated :class:`Config`.
         """
@@ -148,6 +158,7 @@ class Config:
             autogen=_as_bool(data.get("autogen"), base.autogen),
             hotkey=_as_str(data.get("hotkey"), base.hotkey),
             ocr_hotkey=_as_str(data.get("ocr_hotkey"), base.ocr_hotkey),
+            auto_add=_as_bool(data.get("auto_add"), base.auto_add),
             plus_overlay=_as_bool(data.get("plus_overlay"), base.plus_overlay),
             enabled=_as_bool(data.get("enabled"), base.enabled),
             lookup_enabled=_as_bool(data.get("lookup_enabled"), base.lookup_enabled),

@@ -195,3 +195,30 @@ class TestBrowserSkip:
 
     def test_older_config_without_the_key_still_loads(self) -> None:
         assert Config.from_dict({"deck_name": "D"}).skip_in_browsers is True
+
+
+class TestAutoAdd:
+    """Adding straight away, without the confirm popup.
+
+    Default ON: the capture gesture — a hotkey, or clicking the "+" — is already a deliberate
+    act, so a dialog whose only content is what you just selected asks you to confirm a decision
+    you already made. Kept as a setting because there are real reasons to want the popup back:
+    tuning the field map, or a source whose accessibility text needs an edit first.
+    """
+
+    def test_it_defaults_to_on(self):
+        assert Config().auto_add is True
+
+    def test_it_round_trips(self):
+        restored = Config.from_dict(Config(auto_add=False).to_dict())
+
+        assert restored.auto_add is False
+
+    def test_a_config_saved_before_this_option_existed_gets_the_new_default(self):
+        """An older config file has no such key, so it must inherit the default rather than
+        silently keep the old behaviour — otherwise the setting appears on, while the popup
+        still shows, and nothing explains why."""
+        stored = Config().to_dict()
+        del stored["auto_add"]
+
+        assert Config.from_dict(stored).auto_add is True
