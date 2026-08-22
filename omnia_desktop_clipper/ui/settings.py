@@ -64,6 +64,16 @@ class SettingsDialog(QDialog):
             "Tag notes 'omnia-autogen' so Omnia auto-generates the card"
         )
         self._autogen_check.setChecked(config.autogen)
+        self._auto_add_check = QCheckBox(
+            "Add straight away, without the confirm popup"
+        )
+        self._auto_add_check.setChecked(config.auto_add)
+        self._auto_add_check.setToolTip(
+            "The capture gesture is already deliberate, so the popup asks you to confirm a "
+            "decision you have made.\n"
+            "Off = review and edit the word/context before it is added — useful while tuning "
+            "the field map, or for a source whose text needs a fix first."
+        )
         self._plus_overlay_check = QCheckBox(
             "Show a floating + on double-click / drag-select (needs Input Monitoring on macOS)"
         )
@@ -116,6 +126,7 @@ class SettingsDialog(QDialog):
         form.addRow("Capture hotkey", self._hotkey_edit)
         form.addRow("OCR hotkey", self._ocr_hotkey_edit)
         form.addRow(self._autogen_check)
+        form.addRow(self._auto_add_check)
         form.addRow(self._plus_overlay_check)
         form.addRow(self._skip_browsers_check)
         form.addRow(self._lookup_check)
@@ -207,6 +218,7 @@ class SettingsDialog(QDialog):
             autogen=self._autogen_check.isChecked(),
             hotkey=self._hotkey_edit.text().strip(),
             ocr_hotkey=self._ocr_hotkey_edit.text().strip(),
+            auto_add=self._auto_add_check.isChecked(),
             plus_overlay=self._plus_overlay_check.isChecked(),
             enabled=self._enabled_check.isChecked(),
             skip_in_browsers=self._skip_browsers_check.isChecked(),
