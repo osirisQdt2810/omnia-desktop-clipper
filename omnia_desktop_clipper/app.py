@@ -30,13 +30,14 @@ from .capture.context import (
     build_context_provider,
 )
 from .capture.ocr import RapidOcrEngine, RegionOcrCapture
+from .capture_flow import CaptureAction
 from .config import Config
 from .hotkey import GlobalHotkey
 from .lookup.client import LookupClient
 from .lookup.service import LookupService
 from .mouse_watcher import GlobalMouseWatcher
-from .ui.icon import plus_icon
 from .ui.action_overlay import ActionOverlay
+from .ui.icon import plus_icon
 from .ui.lookup_panel import LookupPanel
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
@@ -110,7 +111,9 @@ class ClipperApp(QObject):
         """
         super().__init__()
         self._app = app
-        self._app.setWindowIcon(plus_icon())  # dock / window icon matches the tray + web clipper
+        self._app.setWindowIcon(
+            plus_icon()
+        )  # dock / window icon matches the tray + web clipper
         self._config: Config = config_module.load()
         self._client = self._build_client()
         self._capture: SelectionCapture = build_clipboard_capture(
@@ -191,11 +194,15 @@ class ClipperApp(QObject):
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
-        if not self._config.enabled:  # master switch off (also covers the tray "Capture now")
+        if (
+            not self._config.enabled
+        ):  # master switch off (also covers the tray "Capture now")
             return
         try:
             selection = self._capture.capture()
-        except Exception as exc:  # capture must never crash the app (mirror the OCR path)
+        except (
+            Exception
+        ) as exc:  # capture must never crash the app (mirror the OCR path)
             # Synthesising the copy keystroke can raise without Accessibility/Input-Monitoring
             # permission (macOS) or under Wayland — toast instead of dying in the queued slot.
             self._tray.show_message(
@@ -214,7 +221,9 @@ class ClipperApp(QObject):
 
     def capture_ocr_and_add(self) -> None:
         """Drag-select a screen region, OCR it, confirm, and add the note."""
-        if not self._config.enabled:  # master switch off (also covers the tray OCR item)
+        if (
+            not self._config.enabled
+        ):  # master switch off (also covers the tray OCR item)
             return
         region = RegionSelectOverlay().select_region()
         if region is None:
@@ -249,12 +258,17 @@ class ClipperApp(QObject):
         governs all of them — which is the point: every one of them starts with a deliberate
         gesture, so re-asking is the thing being switched off, not a particular button.
 
-        A capture with nothing in it is still dropped. Without the popup there is no Cancel to
-        catch it, and adding an empty note is worse than adding nothing.
+        The rule itself lives in :class:`~omnia_desktop_clipper.capture_flow.CaptureAction`,
+        which is Qt-free and therefore testable; this method only obeys it. Note the two
+        emptiness checks are NOT the same check: ``decide`` guards the capture as grabbed,
+        and the one below guards what the user left in the popup after editing.
         """
-        if self._config.auto_add:
-            if not word and not context:
-                return
+        action = CaptureAction.decide(
+            auto_add=self._config.auto_add, word=word, context=context
+        )
+        if action is CaptureAction.DROP:
+            return
+        if action is CaptureAction.ADD:
             self._add_note(word, context)
             return
         popup = CapturePopup(
@@ -310,7 +324,9 @@ class ClipperApp(QObject):
         # NB: we do NOT restart the keyboard hotkey listeners here — that would SIGTRAP (see
         # _sync_listeners). A changed hotkey string is saved and applies on the next app launch.
         self._sync_listeners()
-        self._tray.set_enabled(new_config.enabled)  # keep the tray checkbox in sync with Settings
+        self._tray.set_enabled(
+            new_config.enabled
+        )  # keep the tray checkbox in sync with Settings
         if hotkey_changed:
             self._tray.show_message(
                 _TOAST_TITLE, "Hotkey change saved — reopen the app to apply it."
@@ -363,7 +379,9 @@ class ClipperApp(QObject):
             return
         try:
             selection = self._capture.capture()
-        except Exception:  # capture backend / permission error: best-effort, show nothing
+        except (
+            Exception
+        ):  # capture backend / permission error: best-effort, show nothing
             return
         if not selection:
             return  # nothing selected -> no "+"
@@ -375,7 +393,9 @@ class ClipperApp(QObject):
         self._last_gesture_pos = (x, y)
         # A new selection makes any panel on screen stale — hide it before showing the pill.
         self._lookup_panel.hide()
-        self._plus_overlay.set_lookup_hint(None, word)  # neutral until the probe answers
+        self._plus_overlay.set_lookup_hint(
+            None, word
+        )  # neutral until the probe answers
         self._plus_overlay.show_at(x, y)
         if self._config.lookup_enabled:
             # Cheap existence probe so the magnifier can say "N cards" / "no card yet" BEFORE
@@ -420,7 +440,7 @@ class ClipperApp(QObject):
         self._lookup_panel.show_error(word, message, self._last_gesture_pos)
 
     def _add_pending_capture(self) -> None:
-        """"Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""
+        """ "Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""
         pending = self._pending_capture
         self._pending_capture = None
         if pending is not None:
