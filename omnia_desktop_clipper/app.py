@@ -205,7 +205,7 @@ class ClipperApp(QObject):
         Dropping is right rather than queueing: the request was made against a selection the
         outer capture is already in the middle of taking.
         """
-        return bool(getattr(self._capture, "in_flight", False))
+        return self._capture.in_flight
 
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
@@ -214,7 +214,12 @@ class ClipperApp(QObject):
         ):  # master switch off (also covers the tray "Capture now")
             return
         if self._capture_is_busy():
-            return  # a capture is already running; see _capture_is_busy
+            # Every other exit from this method toasts, and this one is the least obvious of
+            # them: the user pressed a hotkey and would otherwise get silence.
+            self._tray.show_message(
+                _TOAST_TITLE, "Already capturing — try again in a moment."
+            )
+            return
         try:
             selection = self._capture.capture()
         except (

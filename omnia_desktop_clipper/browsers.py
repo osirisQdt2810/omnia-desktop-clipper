@@ -40,8 +40,8 @@ _BROWSER_PROCESS_NAMES = frozenset(
         "msedge.exe",
         "firefox.exe",
         "brave.exe",
-        "opera.exe",
-        "opera_gx.exe",
+        "opera.exe",  # Opera GX ships as opera.exe too, under its own directory
+        "chromium.exe",
         "vivaldi.exe",
         "arc.exe",
         "comet.exe",

@@ -132,6 +132,13 @@ def _windows_frontmost_process_name() -> str:
         ]
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
