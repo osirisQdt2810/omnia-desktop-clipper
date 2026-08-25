@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The app-data folder name differs per platform to match each OS's conventions.
 _MAC_APP_DIR = "OmniaDesktopClipper"
@@ -156,7 +156,12 @@ def _windows_frontmost_process_name() -> str:
                 handle, 0, buffer, ctypes.byref(size)
             ):
                 return ""
-            return Path(buffer.value).name.lower()
+            # PureWindowsPath, not Path: this is a WINDOWS path string, and Path applies the
+            # RUNNING host's rules -- on POSIX a backslash is an ordinary character, so the
+            # whole thing comes back as one component. The distinction is invisible in
+            # production (this branch only runs on Windows) and immediately visible to a test
+            # suite that runs on macOS too.
+            return PureWindowsPath(buffer.value).name.lower()
         finally:
             kernel32.CloseHandle(handle)
     except Exception:  # identifying the app is a convenience, never a failure
