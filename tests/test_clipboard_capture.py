@@ -410,11 +410,31 @@ class TestCaptureRefusesToNest:
         assert capture.in_flight is False
         assert capture.capture() == "selected text"
 
-    def test_the_flag_clears_even_when_the_clipboard_raises(self) -> None:
-        class _Exploding(_WindowsLikeClipboard):
-            def get_text(self) -> str:
-                raise RuntimeError("clipboard busy")
+    @pytest.mark.parametrize(
+        "exploding_method",
+        ["snapshot", "set_text", "get_text", "restore"],
+        ids=["snapshot", "set_text", "get_text", "restore"],
+    )
+    def test_the_flag_clears_however_the_clipboard_fails(
+        self, exploding_method
+    ) -> None:
+        """EVERY call that can raise, not just the one that happened to be inside the try.
 
+        ``snapshot`` and ``restore`` both talk to a QMimeData Qt owns and may discard mid-call
+        (``RuntimeError: wrapped C/C++ object ... has been deleted``). If the flag survived one
+        of those, ``in_flight`` would stay True for the rest of the session: no "+", a hotkey
+        that adds nothing, and no error anywhere — the very silent death this class exists to
+        prevent, re-entered through the guard meant to protect it. An earlier version of this
+        test covered only ``get_text``, which was the one path already safe.
+        """
+
+        class _Exploding(_WindowsLikeClipboard):
+            pass
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError(f"{exploding_method} failed")
+
+        setattr(_Exploding, exploding_method, boom)
         clipboard = _Exploding("ORIGINAL")
         capture = ClipboardCapture(
             clipboard, _WindowsCopyEmitter(clipboard, "x"), sleep=lambda _s: None
@@ -422,4 +442,29 @@ class TestCaptureRefusesToNest:
 
         with pytest.raises(RuntimeError):
             capture.capture()
-        assert capture.in_flight is False, "one failure would wedge every later capture"
+        assert capture.in_flight is False, (
+            f"a failing {exploding_method}() left the guard set; every later capture is "
+            "refused for the rest of the session"
+        )
+
+    def test_a_capture_still_works_after_one_failed(self) -> None:
+        """The recovery the guard must not prevent: one transient error, then normal service."""
+        calls = {"n": 0}
+
+        class _FlakyOnce(_WindowsLikeClipboard):
+            def snapshot(self):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("QMimeData deleted")
+                return super().snapshot()
+
+        clipboard = _FlakyOnce("ORIGINAL")
+        capture = ClipboardCapture(
+            clipboard,
+            _WindowsCopyEmitter(clipboard, "selected text"),
+            sleep=lambda _s: clipboard.pump(),
+        )
+
+        with pytest.raises(RuntimeError):
+            capture.capture()
+        assert capture.capture() == "selected text"

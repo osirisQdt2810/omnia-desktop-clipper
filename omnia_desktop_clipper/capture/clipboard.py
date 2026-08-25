@@ -101,16 +101,25 @@ class ClipboardCapture(SelectionCapture):
         if self._in_flight:
             return None
         self._in_flight = True
-        # Snapshot the FULL clipboard (not just its text) so restoring can't wipe a copied image
-        # or file list — a plain get_text()/set_text() round-trip would replace those with "".
-        snapshot = self._clipboard.snapshot()
         try:
-            self._clipboard.set_text("")
-            self._copy_emitter.emit()
-            self._sleep(self._settle_seconds)
-            captured = self._clipboard.get_text()
+            # Snapshot the FULL clipboard (not just its text) so restoring can't wipe a copied
+            # image or file list — a plain get_text()/set_text() round-trip would replace those
+            # with "".
+            snapshot = self._clipboard.snapshot()
+            try:
+                self._clipboard.set_text("")
+                self._copy_emitter.emit()
+                self._sleep(self._settle_seconds)
+                captured = self._clipboard.get_text()
+            finally:
+                self._clipboard.restore(snapshot)
         finally:
-            self._clipboard.restore(snapshot)
+            # The reset sits OUTSIDE everything that can throw, and the nesting exists only for
+            # that. `snapshot()` and `restore()` both talk to a QMimeData Qt owns and may
+            # discard mid-call, and either raising with the flag still set would leave
+            # `in_flight` True for the rest of the session: no "+", a hotkey that adds nothing,
+            # and no error anywhere — the exact silent death this class was fixed to end,
+            # re-entered through the guard meant to protect it.
             self._in_flight = False
         captured = captured.strip()
         return captured or None
