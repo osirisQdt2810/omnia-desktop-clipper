@@ -7,6 +7,8 @@ is returned, and the original clipboard is restored.
 
 from __future__ import annotations
 
+import pytest
+
 from omnia_desktop_clipper.capture.clipboard import (
     ClipboardAccessor,
     ClipboardCapture,
@@ -288,12 +290,12 @@ class TestQtEventLoopSettle:
 
         assert time.monotonic() - started >= 0.07
 
-    def test_it_never_delivers_user_input_while_capturing(self, monkeypatch) -> None:
-        """Pumping must not let a second double-click re-enter the handler mid-capture.
+    def test_it_excludes_user_input_from_the_pump(self, monkeypatch) -> None:
+        """Kept because nothing here needs input delivered, not as a re-entrancy defence.
 
-        The blocking sleep this replaced could not deliver input, so the pump must not quietly
-        introduce a re-entrancy the capture never had to survive: the clipboard is cleared and
-        the snapshot only half-restored while this runs.
+        It is NOT one: every gesture and hotkey arrives as a queued cross-thread signal, which
+        ``processEvents`` delivers whatever this flag says. Nesting is refused by
+        :class:`TestCaptureRefusesToNest` instead.
         """
         from omnia_desktop_clipper.capture.clipboard import QtEventLoopSettle
 
@@ -334,3 +336,90 @@ class TestTheShippedWiringUsesIt:
             "the shipped capture no longer pumps the event loop while settling; "
             "on Windows every capture will come back empty"
         )
+
+
+class TestCaptureRefusesToNest:
+    """Pumping the event loop makes a nested capture REACHABLE; it must still be impossible.
+
+    A blocking sleep delivered nothing, so nesting could not happen. The pump delivers queued
+    cross-thread signals -- which is how every gesture and hotkey in this app arrives -- so the
+    guard has to be explicit rather than a side effect of blocking.
+    """
+
+    @staticmethod
+    def _capture_that_reenters(clipboard, emitter, attempts):
+        """A capture whose SETTLE calls back into itself, the way a pumped signal would."""
+        capture = ClipboardCapture(clipboard, emitter, sleep=lambda _s: None)
+
+        def settle(_seconds: float) -> None:
+            attempts.append(capture.capture())
+
+        capture._sleep = settle
+        return capture
+
+    def test_a_nested_call_is_refused(self) -> None:
+        clipboard = _WindowsLikeClipboard("ORIGINAL")
+        attempts: list = []
+        capture = self._capture_that_reenters(
+            clipboard, _WindowsCopyEmitter(clipboard, "selected text"), attempts
+        )
+
+        capture.capture()
+
+        assert attempts == [None], "the nested capture was allowed to run"
+
+    def test_the_outer_capture_still_returns_the_selection(self) -> None:
+        """The bug this prevents: the nested call restored an EMPTY snapshot over the real one,
+        so the gesture the user actually made came back with nothing and showed no "+".
+        """
+        clipboard = _WindowsLikeClipboard("ORIGINAL")
+        attempts: list = []
+        capture = self._capture_that_reenters(
+            clipboard, _WindowsCopyEmitter(clipboard, "selected text"), attempts
+        )
+
+        def settle(_seconds: float) -> None:
+            attempts.append(capture.capture())
+            clipboard.pump()
+
+        capture._sleep = settle
+
+        assert capture.capture() == "selected text"
+
+    def test_the_users_clipboard_survives_a_nested_attempt(self) -> None:
+        clipboard = _WindowsLikeClipboard("ORIGINAL")
+        attempts: list = []
+        capture = self._capture_that_reenters(
+            clipboard, _WindowsCopyEmitter(clipboard, "selected text"), attempts
+        )
+
+        capture.capture()
+
+        assert clipboard.get_text() == "ORIGINAL"
+
+    def test_the_flag_clears_so_the_next_gesture_works(self) -> None:
+        """A guard that never resets would silently kill every capture after the first."""
+        clipboard = _WindowsLikeClipboard("ORIGINAL")
+        capture = ClipboardCapture(
+            clipboard,
+            _WindowsCopyEmitter(clipboard, "selected text"),
+            sleep=lambda _s: clipboard.pump(),
+        )
+
+        assert capture.capture() == "selected text"
+        assert capture.in_flight is False
+        assert capture.capture() == "selected text"
+
+    def test_the_flag_clears_even_when_the_clipboard_raises(self) -> None:
+        class _Exploding(_WindowsLikeClipboard):
+            def get_text(self) -> str:
+                raise RuntimeError("clipboard busy")
+
+        clipboard = _Exploding("ORIGINAL")
+        capture = ClipboardCapture(
+            clipboard, _WindowsCopyEmitter(clipboard, "x"), sleep=lambda _s: None
+        )
+
+        with pytest.raises(RuntimeError):
+            capture.capture()
+        assert capture.in_flight is False, "one failure would wedge every later capture"

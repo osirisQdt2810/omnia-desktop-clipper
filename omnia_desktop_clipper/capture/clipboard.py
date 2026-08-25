@@ -81,9 +81,26 @@ class ClipboardCapture(SelectionCapture):
         self._copy_emitter = copy_emitter
         self._settle_seconds = settle_seconds
         self._sleep = sleep
+        self._in_flight = False
 
     def capture(self) -> str | None:
-        """Return the selected text (stripped), or ``None`` if nothing captured."""
+        """Return the selected text (stripped), or ``None`` if nothing captured.
+
+        RE-ENTRANT CALLS ARE REFUSED, and that is a correctness guard rather than an
+        optimisation. The settle is spent pumping the host's event loop (see
+        :class:`QtEventLoopSettle`), and a pump delivers queued cross-thread signals — which is
+        how every gesture and hotkey in this app arrives. Without this flag a second gesture
+        during the settle re-enters here, snapshots the ALREADY-CLEARED clipboard, and restores
+        that empty snapshot on its way out; the outer call then reads "" and reports nothing
+        selected, so the gesture the user actually made produces no "+".
+
+        Refusing is the honest answer: between ``set_text("")`` and ``restore`` the clipboard
+        does not hold the user's data, so there is nothing a nested call could truthfully
+        return.
+        """
+        if self._in_flight:
+            return None
+        self._in_flight = True
         # Snapshot the FULL clipboard (not just its text) so restoring can't wipe a copied image
         # or file list — a plain get_text()/set_text() round-trip would replace those with "".
         snapshot = self._clipboard.snapshot()
@@ -94,8 +111,21 @@ class ClipboardCapture(SelectionCapture):
             captured = self._clipboard.get_text()
         finally:
             self._clipboard.restore(snapshot)
+            self._in_flight = False
         captured = captured.strip()
         return captured or None
+
+    @property
+    def in_flight(self) -> bool:
+        """Whether a capture is running right now.
+
+        Public because the GUI needs it too: this class can refuse a nested capture, but it
+        cannot stop a pumped signal from opening a MODAL dialog underneath the ``finally``
+        above — and a modal runs its own event loop, so the user can sit there copying things
+        while this call's ``restore`` waits to overwrite the clipboard with what was there
+        before their gesture.
+        """
+        return self._in_flight
 
 
 class QtClipboard(ClipboardAccessor):
@@ -183,13 +213,16 @@ class QtEventLoopSettle:
     def __call__(self, seconds: float) -> None:
         """Wait ``seconds``, processing pending Qt events throughout.
 
-        User input is EXCLUDED from the pump, and that exclusion is load-bearing rather than
-        tidiness. This runs inside the handler for a double-click; delivering queued mouse and
-        key events here would let a second double-click re-enter that handler mid-capture, with
-        the clipboard already cleared and the first capture's snapshot half-restored. A blocking
-        sleep could not do that, so pumping must not quietly introduce it. The clipboard arrives
-        as a system message, not as user input, so excluding input costs the capture nothing —
-        measured on Windows, not assumed.
+        User input is excluded from the pump because nothing here needs it: the clipboard
+        arrives as a system message, so the exclusion costs the capture nothing (measured on
+        Windows, not assumed) while keeping stray clicks off our own widgets mid-capture.
+
+        IT IS NOT THE RE-ENTRANCY DEFENCE, and an earlier version of this docstring wrongly
+        said it was. ``ExcludeUserInputEvents`` filters Qt's own input queue; every gesture and
+        hotkey in this app arrives on a pynput listener thread and crosses to the GUI thread as
+        a QUEUED SIGNAL, which ``processEvents`` delivers whatever the flag says. Re-entrancy is
+        refused by :meth:`ClipboardCapture.capture` and by the app's own busy check, both of
+        which work regardless of how the event got here.
         """
         from PyQt6.QtCore import QEventLoop
         from PyQt6.QtWidgets import QApplication

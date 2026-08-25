@@ -119,6 +119,20 @@ def _windows_frontmost_process_name() -> str:
 
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        # Declare the signatures. Without them ctypes assumes ``c_int``, which TRUNCATES a
+        # 64-bit HWND/HANDLE and sign-extends it back; Windows keeps these values
+        # 32-bit-significant so it happens to work, and that is exactly the kind of thing that
+        # stops happening to work on someone else's machine.
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             return ""
@@ -132,7 +146,11 @@ def _windows_frontmost_process_name() -> str:
         if not handle:
             return ""
         try:
-            size = wintypes.DWORD(260)
+            # 32768, not MAX_PATH. A browser installed under a long path overflows a 260-char
+            # buffer, QueryFullProcessImageNameW fails with ERROR_INSUFFICIENT_BUFFER, and this
+            # returns "" -- which is read as "not a browser", bringing back the two-"+"
+            # collision for exactly the users with the longest install paths.
+            size = wintypes.DWORD(32768)
             buffer = ctypes.create_unicode_buffer(size.value)
             if not kernel32.QueryFullProcessImageNameW(
                 handle, 0, buffer, ctypes.byref(size)
