@@ -81,21 +81,60 @@ class ClipboardCapture(SelectionCapture):
         self._copy_emitter = copy_emitter
         self._settle_seconds = settle_seconds
         self._sleep = sleep
+        self._in_flight = False
 
     def capture(self) -> str | None:
-        """Return the selected text (stripped), or ``None`` if nothing captured."""
-        # Snapshot the FULL clipboard (not just its text) so restoring can't wipe a copied image
-        # or file list — a plain get_text()/set_text() round-trip would replace those with "".
-        snapshot = self._clipboard.snapshot()
+        """Return the selected text (stripped), or ``None`` if nothing captured.
+
+        RE-ENTRANT CALLS ARE REFUSED, and that is a correctness guard rather than an
+        optimisation. The settle is spent pumping the host's event loop (see
+        :class:`QtEventLoopSettle`), and a pump delivers queued cross-thread signals — which is
+        how every gesture and hotkey in this app arrives. Without this flag a second gesture
+        during the settle re-enters here, snapshots the ALREADY-CLEARED clipboard, and restores
+        that empty snapshot on its way out; the outer call then reads "" and reports nothing
+        selected, so the gesture the user actually made produces no "+".
+
+        Refusing is the honest answer: between ``set_text("")`` and ``restore`` the clipboard
+        does not hold the user's data, so there is nothing a nested call could truthfully
+        return.
+        """
+        if self._in_flight:
+            return None
+        self._in_flight = True
         try:
-            self._clipboard.set_text("")
-            self._copy_emitter.emit()
-            self._sleep(self._settle_seconds)
-            captured = self._clipboard.get_text()
+            # Snapshot the FULL clipboard (not just its text) so restoring can't wipe a copied
+            # image or file list — a plain get_text()/set_text() round-trip would replace those
+            # with "".
+            snapshot = self._clipboard.snapshot()
+            try:
+                self._clipboard.set_text("")
+                self._copy_emitter.emit()
+                self._sleep(self._settle_seconds)
+                captured = self._clipboard.get_text()
+            finally:
+                self._clipboard.restore(snapshot)
         finally:
-            self._clipboard.restore(snapshot)
+            # The reset sits OUTSIDE everything that can throw, and the nesting exists only for
+            # that. `snapshot()` and `restore()` both talk to a QMimeData Qt owns and may
+            # discard mid-call, and either raising with the flag still set would leave
+            # `in_flight` True for the rest of the session: no "+", a hotkey that adds nothing,
+            # and no error anywhere — the exact silent death this class was fixed to end,
+            # re-entered through the guard meant to protect it.
+            self._in_flight = False
         captured = captured.strip()
         return captured or None
+
+    @property
+    def in_flight(self) -> bool:
+        """Whether a capture is running right now.
+
+        Public because the GUI needs it too: this class can refuse a nested capture, but it
+        cannot stop a pumped signal from opening a MODAL dialog underneath the ``finally``
+        above — and a modal runs its own event loop, so the user can sit there copying things
+        while this call's ``restore`` waits to overwrite the clipboard with what was there
+        before their gesture.
+        """
+        return self._in_flight
 
 
 class QtClipboard(ClipboardAccessor):
@@ -127,7 +166,9 @@ class QtClipboard(ClipboardAccessor):
                 data.setData(fmt, source.data(fmt))
         return data
 
-    def restore(self, snapshot: object) -> None:  # pragma: no cover - needs a live QApplication
+    def restore(
+        self, snapshot: object
+    ) -> None:  # pragma: no cover - needs a live QApplication
         from PyQt6.QtCore import QMimeData
 
         if isinstance(snapshot, QMimeData):
@@ -149,8 +190,68 @@ class PynputCopyEmitter(CopyEmitter):
             self._controller.release("c")
 
 
+class QtEventLoopSettle:
+    """The settle wait, spent PUMPING Qt's event loop instead of blocking it.
+
+    This exists because a plain ``time.sleep`` makes the capture return nothing on Windows, and
+    it is not obvious why. Qt learns that another application put something on the clipboard by
+    processing a native window message (``WM_CLIPBOARDUPDATE`` and the delayed-rendering
+    handshake behind it). :meth:`ClipboardCapture.capture` runs on the Qt main thread, so a
+    blocking sleep there means those messages are never processed during the one window that
+    matters: ``get_text()`` then reports the value we ourselves wrote a moment earlier — the
+    empty string used to tell "nothing was selected" apart from a real copy — and every capture
+    comes back ``None``. No "+" ever appears, and the hotkey capture silently adds nothing.
+
+    macOS never showed this. ``NSPasteboard`` is polled on access (Qt compares its
+    ``changeCount``), so the answer is correct with no event processing at all, which is why the
+    blocking sleep survived review and shipped.
+
+    Pumping is confined to this class so the algorithm in :class:`ClipboardCapture` stays free of
+    Qt and keeps unit-testing headless with an injected no-op sleep.
+    """
+
+    def __init__(self, *, slice_seconds: float = 0.01) -> None:
+        """Initialise the settle.
+
+        Args:
+            slice_seconds: How long to sleep between pumps. Small enough that the clipboard
+                message is picked up promptly, large enough not to spin a core.
+        """
+        self._slice = slice_seconds
+
+    def __call__(self, seconds: float) -> None:
+        """Wait ``seconds``, processing pending Qt events throughout.
+
+        User input is excluded from the pump because nothing here needs it: the clipboard
+        arrives as a system message, so the exclusion costs the capture nothing (measured on
+        Windows, not assumed) while keeping stray clicks off our own widgets mid-capture.
+
+        IT IS NOT THE RE-ENTRANCY DEFENCE, and an earlier version of this docstring wrongly
+        said it was. ``ExcludeUserInputEvents`` filters Qt's own input queue; every gesture and
+        hotkey in this app arrives on a pynput listener thread and crosses to the GUI thread as
+        a QUEUED SIGNAL, which ``processEvents`` delivers whatever the flag says. Re-entrancy is
+        refused by :meth:`ClipboardCapture.capture` and by the app's own busy check, both of
+        which work regardless of how the event got here.
+        """
+        from PyQt6.QtCore import QEventLoop
+        from PyQt6.QtWidgets import QApplication
+
+        end = time.monotonic() + seconds
+        while True:
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(self._slice, remaining))
+
+
 def build_clipboard_capture(*, use_command_key: bool) -> ClipboardCapture:
     """Wire the concrete Qt clipboard + pynput emitter (runtime only).
+
+    The settle is :class:`QtEventLoopSettle`, not ``time.sleep`` — see that class for why a
+    blocking wait returns an empty capture on Windows.
 
     Args:
         use_command_key: Use Cmd (macOS) instead of Ctrl for the copy shortcut.
@@ -158,4 +259,8 @@ def build_clipboard_capture(*, use_command_key: bool) -> ClipboardCapture:
     Returns:
         A ready-to-use :class:`ClipboardCapture`.
     """
-    return ClipboardCapture(QtClipboard(), PynputCopyEmitter(use_command_key))
+    return ClipboardCapture(
+        QtClipboard(),
+        PynputCopyEmitter(use_command_key),
+        sleep=QtEventLoopSettle(),
+    )

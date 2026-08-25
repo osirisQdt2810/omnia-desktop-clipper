@@ -192,11 +192,33 @@ class ClipperApp(QObject):
             self._mouse_watcher.stop()
             self._plus_overlay.hide()
 
+    def _capture_is_busy(self) -> bool:
+        """Whether a capture is mid-flight, so this request must be dropped.
+
+        The settle inside a capture PUMPS the event loop, and a pump delivers the queued
+        cross-thread signals every gesture and hotkey in this app arrives on. Anything that
+        opens a modal -- the confirm popup, the OCR region overlay -- would then run its own
+        event loop UNDERNEATH the outer capture's ``finally``, which is still holding the
+        user's real clipboard waiting to put it back. The user can sit in that modal copying
+        whatever they like, and the outer ``restore`` would then overwrite it.
+
+        Dropping is right rather than queueing: the request was made against a selection the
+        outer capture is already in the middle of taking.
+        """
+        return self._capture.in_flight
+
     def capture_and_add(self) -> None:
         """Capture the selection, resolve its context, confirm, and add the note."""
         if (
             not self._config.enabled
         ):  # master switch off (also covers the tray "Capture now")
+            return
+        if self._capture_is_busy():
+            # Every other exit from this method toasts, and this one is the least obvious of
+            # them: the user pressed a hotkey and would otherwise get silence.
+            self._tray.show_message(
+                _TOAST_TITLE, "Already capturing — try again in a moment."
+            )
             return
         try:
             selection = self._capture.capture()
@@ -224,6 +246,9 @@ class ClipperApp(QObject):
         if (
             not self._config.enabled
         ):  # master switch off (also covers the tray OCR item)
+            return
+        if self._capture_is_busy():
+            # The region overlay runs its own event loop; it must not nest inside a capture.
             return
         region = RegionSelectOverlay().select_region()
         if region is None:
@@ -370,8 +395,10 @@ class ClipperApp(QObject):
         """
         if not self._config.enabled:  # master switch off
             return
+        if self._capture_is_busy():
+            return  # a second gesture landed inside the first capture's settle
         if self._config.skip_in_browsers and is_browser(
-            platform_helpers.frontmost_bundle_id()
+            platform_helpers.frontmost_app_id()
         ):
             # The web clipper owns browsers: it reads the DOM, so it gets the exact sentence AND
             # the whole paragraph plus the page URL — more than accessibility can give here — and

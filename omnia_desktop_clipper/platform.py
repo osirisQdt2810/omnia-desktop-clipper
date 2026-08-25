@@ -10,12 +10,16 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The app-data folder name differs per platform to match each OS's conventions.
 _MAC_APP_DIR = "OmniaDesktopClipper"
 _WIN_APP_DIR = "OmniaDesktopClipper"
 _LINUX_APP_DIR = "omnia-desktop-clipper"
+
+# Win32: the least privilege that still lets QueryFullProcessImageNameW name another
+# ordinary user process. Asking for more would fail against processes we are entitled to read.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
 def config_dir(
@@ -68,20 +72,106 @@ def frontmost_pid() -> int | None:
         return None
 
 
-def frontmost_bundle_id() -> str:
-    """Return the frontmost app's bundle identifier, or ``""`` if unavailable.
+def frontmost_app_id() -> str:
+    """Return an identifier for the frontmost app, or ``""`` when it cannot be determined.
 
-    macOS only (AppKit ``NSWorkspace``); used to tell a browser apart from every other app.
-    Must be called on the main thread.
+    The two platforms have no common way to name a running application, so this returns
+    whichever its OS can give and :func:`~omnia_desktop_clipper.browsers.is_browser` accepts
+    both: a **bundle id** on macOS (``com.google.chrome``) and a **process image name** on
+    Windows (``chrome.exe``).
+
+    Windows returned ``""`` unconditionally until this was written, which silently disabled the
+    whole browser hand-off there: every app looked unrecognised, the desktop "+" never stood
+    aside, and a double-click in Chrome raised two "+" buttons once the capture worked at all.
+
+    Linux still returns ``""``. Identifying the focused window means talking to X11 or a
+    compositor-specific Wayland protocol, which is a different job from this one; the honest
+    consequence is that the hand-off does not happen there, so both clippers may offer to
+    capture in a Linux browser.
+
+    Must be called on the main thread (the macOS path touches AppKit).
     """
-    if sys.platform != "darwin":
-        return ""
-    try:
-        from AppKit import NSWorkspace
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSWorkspace
 
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return "" if app is None else str(app.bundleIdentifier() or "")
-    except Exception:
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return "" if app is None else str(app.bundleIdentifier() or "")
+        except Exception:
+            return ""
+    if sys.platform.startswith("win"):
+        return _windows_frontmost_process_name()
+    return ""
+
+
+def _windows_frontmost_process_name() -> str:
+    """The image name of the process owning the foreground window (``""`` on any failure).
+
+    Uses ``ctypes`` rather than a dependency: the clipper vendors nothing on Windows for this,
+    and ``QueryFullProcessImageNameW`` needs only ``PROCESS_QUERY_LIMITED_INFORMATION``, which
+    an ordinary user process is granted for other ordinary user processes. An elevated
+    foreground app therefore comes back ``""`` — treated as "not a browser", which keeps the
+    "+" working there rather than silently disabling it.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        # Declare the signatures. Without them ctypes assumes ``c_int``, which TRUNCATES a
+        # 64-bit HWND/HANDLE and sign-extends it back; Windows keeps these values
+        # 32-bit-significant so it happens to work, and that is exactly the kind of thing that
+        # stops happening to work on someone else's machine.
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        handle = kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+        )
+        if not handle:
+            return ""
+        try:
+            # 32768, not MAX_PATH. A browser installed under a long path overflows a 260-char
+            # buffer, QueryFullProcessImageNameW fails with ERROR_INSUFFICIENT_BUFFER, and this
+            # returns "" -- which is read as "not a browser", bringing back the two-"+"
+            # collision for exactly the users with the longest install paths.
+            size = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)
+            ):
+                return ""
+            # PureWindowsPath, not Path: this is a WINDOWS path string, and Path applies the
+            # RUNNING host's rules -- on POSIX a backslash is an ordinary character, so the
+            # whole thing comes back as one component. The distinction is invisible in
+            # production (this branch only runs on Windows) and immediately visible to a test
+            # suite that runs on macOS too.
+            return PureWindowsPath(buffer.value).name.lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:  # identifying the app is a convenience, never a failure
         return ""
 
 
