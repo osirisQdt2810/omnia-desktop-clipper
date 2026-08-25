@@ -228,15 +228,26 @@ class TestQtEventLoopSettle:
 
         class _FakeQApplication:
             @staticmethod
-            def processEvents() -> None:  # noqa: N802 - Qt's own spelling
+            def processEvents(flags=None) -> None:  # noqa: N802 - Qt's own spelling
                 calls["n"] += 1
+                calls.setdefault("flags", []).append(flags)
+
+        class _ProcessEventsFlag:
+            ExcludeUserInputEvents = "exclude-user-input"
+
+        class _FakeQEventLoop:
+            ProcessEventsFlag = _ProcessEventsFlag
 
         widgets = types.ModuleType("PyQt6.QtWidgets")
         widgets.QApplication = _FakeQApplication  # type: ignore[attr-defined]
+        core = types.ModuleType("PyQt6.QtCore")
+        core.QEventLoop = _FakeQEventLoop  # type: ignore[attr-defined]
         package = types.ModuleType("PyQt6")
         package.QtWidgets = widgets  # type: ignore[attr-defined]
+        package.QtCore = core  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "PyQt6", package)
         monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", widgets)
+        monkeypatch.setitem(sys.modules, "PyQt6.QtCore", core)
         return calls
 
     def test_it_pumps_at_least_once_even_for_a_zero_wait(self, monkeypatch) -> None:
@@ -276,6 +287,21 @@ class TestQtEventLoopSettle:
         QtEventLoopSettle(slice_seconds=0.005)(0.08)
 
         assert time.monotonic() - started >= 0.07
+
+    def test_it_never_delivers_user_input_while_capturing(self, monkeypatch) -> None:
+        """Pumping must not let a second double-click re-enter the handler mid-capture.
+
+        The blocking sleep this replaced could not deliver input, so the pump must not quietly
+        introduce a re-entrancy the capture never had to survive: the clipboard is cleared and
+        the snapshot only half-restored while this runs.
+        """
+        from omnia_desktop_clipper.capture.clipboard import QtEventLoopSettle
+
+        calls = self._with_fake_qt(monkeypatch)
+        QtEventLoopSettle(slice_seconds=0.001)(0.02)
+
+        assert calls["flags"], "processEvents was called with no flag at all"
+        assert all(flag == "exclude-user-input" for flag in calls["flags"])
 
 
 class TestTheShippedWiringUsesIt:

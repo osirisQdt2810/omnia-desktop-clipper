@@ -181,12 +181,24 @@ class QtEventLoopSettle:
         self._slice = slice_seconds
 
     def __call__(self, seconds: float) -> None:
-        """Wait ``seconds``, processing pending Qt events throughout."""
+        """Wait ``seconds``, processing pending Qt events throughout.
+
+        User input is EXCLUDED from the pump, and that exclusion is load-bearing rather than
+        tidiness. This runs inside the handler for a double-click; delivering queued mouse and
+        key events here would let a second double-click re-enter that handler mid-capture, with
+        the clipboard already cleared and the first capture's snapshot half-restored. A blocking
+        sleep could not do that, so pumping must not quietly introduce it. The clipboard arrives
+        as a system message, not as user input, so excluding input costs the capture nothing —
+        measured on Windows, not assumed.
+        """
+        from PyQt6.QtCore import QEventLoop
         from PyQt6.QtWidgets import QApplication
 
         end = time.monotonic() + seconds
         while True:
-            QApplication.processEvents()
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
             remaining = end - time.monotonic()
             if remaining <= 0:
                 return
