@@ -17,6 +17,10 @@ _MAC_APP_DIR = "OmniaDesktopClipper"
 _WIN_APP_DIR = "OmniaDesktopClipper"
 _LINUX_APP_DIR = "omnia-desktop-clipper"
 
+# Win32: the least privilege that still lets QueryFullProcessImageNameW name another
+# ordinary user process. Asking for more would fail against processes we are entitled to read.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
 
 def config_dir(
     platform_name: str | None = None,
@@ -68,20 +72,76 @@ def frontmost_pid() -> int | None:
         return None
 
 
-def frontmost_bundle_id() -> str:
-    """Return the frontmost app's bundle identifier, or ``""`` if unavailable.
+def frontmost_app_id() -> str:
+    """Return an identifier for the frontmost app, or ``""`` when it cannot be determined.
 
-    macOS only (AppKit ``NSWorkspace``); used to tell a browser apart from every other app.
-    Must be called on the main thread.
+    The two platforms have no common way to name a running application, so this returns
+    whichever its OS can give and :func:`~omnia_desktop_clipper.browsers.is_browser` accepts
+    both: a **bundle id** on macOS (``com.google.chrome``) and a **process image name** on
+    Windows (``chrome.exe``).
+
+    Windows returned ``""`` unconditionally until this was written, which silently disabled the
+    whole browser hand-off there: every app looked unrecognised, the desktop "+" never stood
+    aside, and a double-click in Chrome raised two "+" buttons once the capture worked at all.
+
+    Linux still returns ``""``. Identifying the focused window means talking to X11 or a
+    compositor-specific Wayland protocol, which is a different job from this one; the honest
+    consequence is that the hand-off does not happen there, so both clippers may offer to
+    capture in a Linux browser.
+
+    Must be called on the main thread (the macOS path touches AppKit).
     """
-    if sys.platform != "darwin":
-        return ""
-    try:
-        from AppKit import NSWorkspace
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSWorkspace
 
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return "" if app is None else str(app.bundleIdentifier() or "")
-    except Exception:
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return "" if app is None else str(app.bundleIdentifier() or "")
+        except Exception:
+            return ""
+    if sys.platform.startswith("win"):
+        return _windows_frontmost_process_name()
+    return ""
+
+
+def _windows_frontmost_process_name() -> str:
+    """The image name of the process owning the foreground window (``""`` on any failure).
+
+    Uses ``ctypes`` rather than a dependency: the clipper vendors nothing on Windows for this,
+    and ``QueryFullProcessImageNameW`` needs only ``PROCESS_QUERY_LIMITED_INFORMATION``, which
+    an ordinary user process is granted for other ordinary user processes. An elevated
+    foreground app therefore comes back ``""`` — treated as "not a browser", which keeps the
+    "+" working there rather than silently disabling it.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        handle = kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+        )
+        if not handle:
+            return ""
+        try:
+            size = wintypes.DWORD(260)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)
+            ):
+                return ""
+            return Path(buffer.value).name.lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:  # identifying the app is a convenience, never a failure
         return ""
 
 

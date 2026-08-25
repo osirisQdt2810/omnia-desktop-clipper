@@ -30,11 +30,35 @@ _BROWSER_BUNDLE_IDS = frozenset(
 )
 
 
-def is_browser(bundle_id: str) -> bool:
-    """Whether ``bundle_id`` names a browser the web clipper covers.
+# Executable names of the same browsers on Windows. A bundle id is a macOS concept; Windows has
+# no equivalent, so the frontmost app is identified by the image name of its process instead.
+# Without this set every Windows app looked "not a browser", the desktop "+" never stood aside,
+# and a double-click in Chrome raised TWO "+" buttons — the exact collision the split prevents.
+_BROWSER_PROCESS_NAMES = frozenset(
+    {
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "opera_gx.exe",
+        "vivaldi.exe",
+        "arc.exe",
+        "comet.exe",
+    }
+)
+
+
+def is_browser(app_id: str) -> bool:
+    """Whether ``app_id`` names a browser the web clipper covers.
+
+    Accepts either platform's identifier — a macOS bundle id (``com.google.chrome``) or a
+    Windows process image name (``chrome.exe``) — because the two operating systems have no
+    common way to name a running application, and the caller has whichever its OS could give.
 
     Args:
-        bundle_id: The frontmost app's bundle identifier (empty when unknown, which is NOT a
-            browser — an unknown app must keep working normally).
+        app_id: The frontmost app's identifier (empty when unknown, which is NOT a browser —
+            an unknown app must keep working normally).
     """
-    return bundle_id.strip().lower() in _BROWSER_BUNDLE_IDS
+    normalised = app_id.strip().lower()
+    return normalised in _BROWSER_BUNDLE_IDS or normalised in _BROWSER_PROCESS_NAMES

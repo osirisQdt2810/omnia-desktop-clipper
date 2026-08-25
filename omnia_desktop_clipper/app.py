@@ -371,7 +371,7 @@ class ClipperApp(QObject):
         if not self._config.enabled:  # master switch off
             return
         if self._config.skip_in_browsers and is_browser(
-            platform_helpers.frontmost_bundle_id()
+            platform_helpers.frontmost_app_id()
         ):
             # The web clipper owns browsers: it reads the DOM, so it gets the exact sentence AND
             # the whole paragraph plus the page URL — more than accessibility can give here — and

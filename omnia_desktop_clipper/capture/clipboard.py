@@ -127,7 +127,9 @@ class QtClipboard(ClipboardAccessor):
                 data.setData(fmt, source.data(fmt))
         return data
 
-    def restore(self, snapshot: object) -> None:  # pragma: no cover - needs a live QApplication
+    def restore(
+        self, snapshot: object
+    ) -> None:  # pragma: no cover - needs a live QApplication
         from PyQt6.QtCore import QMimeData
 
         if isinstance(snapshot, QMimeData):
@@ -149,8 +151,53 @@ class PynputCopyEmitter(CopyEmitter):
             self._controller.release("c")
 
 
+class QtEventLoopSettle:
+    """The settle wait, spent PUMPING Qt's event loop instead of blocking it.
+
+    This exists because a plain ``time.sleep`` makes the capture return nothing on Windows, and
+    it is not obvious why. Qt learns that another application put something on the clipboard by
+    processing a native window message (``WM_CLIPBOARDUPDATE`` and the delayed-rendering
+    handshake behind it). :meth:`ClipboardCapture.capture` runs on the Qt main thread, so a
+    blocking sleep there means those messages are never processed during the one window that
+    matters: ``get_text()`` then reports the value we ourselves wrote a moment earlier — the
+    empty string used to tell "nothing was selected" apart from a real copy — and every capture
+    comes back ``None``. No "+" ever appears, and the hotkey capture silently adds nothing.
+
+    macOS never showed this. ``NSPasteboard`` is polled on access (Qt compares its
+    ``changeCount``), so the answer is correct with no event processing at all, which is why the
+    blocking sleep survived review and shipped.
+
+    Pumping is confined to this class so the algorithm in :class:`ClipboardCapture` stays free of
+    Qt and keeps unit-testing headless with an injected no-op sleep.
+    """
+
+    def __init__(self, *, slice_seconds: float = 0.01) -> None:
+        """Initialise the settle.
+
+        Args:
+            slice_seconds: How long to sleep between pumps. Small enough that the clipboard
+                message is picked up promptly, large enough not to spin a core.
+        """
+        self._slice = slice_seconds
+
+    def __call__(self, seconds: float) -> None:
+        """Wait ``seconds``, processing pending Qt events throughout."""
+        from PyQt6.QtWidgets import QApplication
+
+        end = time.monotonic() + seconds
+        while True:
+            QApplication.processEvents()
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(self._slice, remaining))
+
+
 def build_clipboard_capture(*, use_command_key: bool) -> ClipboardCapture:
     """Wire the concrete Qt clipboard + pynput emitter (runtime only).
+
+    The settle is :class:`QtEventLoopSettle`, not ``time.sleep`` — see that class for why a
+    blocking wait returns an empty capture on Windows.
 
     Args:
         use_command_key: Use Cmd (macOS) instead of Ctrl for the copy shortcut.
@@ -158,4 +205,8 @@ def build_clipboard_capture(*, use_command_key: bool) -> ClipboardCapture:
     Returns:
         A ready-to-use :class:`ClipboardCapture`.
     """
-    return ClipboardCapture(QtClipboard(), PynputCopyEmitter(use_command_key))
+    return ClipboardCapture(
+        QtClipboard(),
+        PynputCopyEmitter(use_command_key),
+        sleep=QtEventLoopSettle(),
+    )
