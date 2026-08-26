@@ -968,7 +968,6 @@ class TestThePdfRouteHasItsOwnBudget:
         self, tmp_path, monkeypatch
     ) -> None:
         """A fresh deadline, not the leftover -- and still a deadline, so it stays bounded."""
-        import time
 
         provider = TestThePdfFallback._provider(
             tmp_path, monkeypatch, ["The word is here."]
@@ -1013,7 +1012,7 @@ class TestClimbingToTheWindow:
         window.parent = desktop
         desktop.children.append(window)
         node = window
-        for level in range(depth):
+        for _level in range(depth):
             child = _Node("")
             child.parent = node
             node.children.append(child)
