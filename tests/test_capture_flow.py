@@ -162,3 +162,63 @@ class TestTheTrayAppObeysTheRule:
         assert callers == {
             "_confirm_and_add"
         }, f"_add_note is called from {sorted(callers)}; only _confirm_and_add may call it"
+
+
+class TestMediaComesFromOmniaFirst:
+    """Structural, for the same reason as above: `app.py` imports PyQt6.
+
+    The order is the fix. AnkiConnect is a separate add-on the user may not have -- on the
+    reporting machine nothing at all was serving its port -- so asking it first meant every
+    image in the panel failed on a perfectly working setup. Omnia's own service already answers
+    the lookup; it answers the media now too, and AnkiConnect is only the fallback for an older
+    omnia whose service has no /media route.
+    """
+
+    @staticmethod
+    def _request_media() -> ast.FunctionDef:
+        return TestTheTrayAppObeysTheRule._function(
+            TestTheTrayAppObeysTheRule._module(), "_request_media"
+        )
+
+    @staticmethod
+    def _attribute_calls(node: ast.AST) -> list[str]:
+        """Every `x.y(...)` inside, in source order."""
+        return [
+            call.func.attr
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+        ]
+
+    def test_both_sources_are_consulted(self):
+        calls = self._attribute_calls(self._request_media())
+
+        assert "media" in calls, "omnia's own media route is not used at all"
+        assert "retrieve_media_file" in calls, "the AnkiConnect fallback was dropped"
+
+    def test_omnia_is_asked_before_ankiconnect(self):
+        """Reversed, the bug returns for anyone without the separate add-on."""
+        source = ast.unparse(self._request_media())
+
+        assert source.index("_lookup.media") < source.index("retrieve_media_file"), (
+            "AnkiConnect is consulted first, so a machine without it fails before omnia is asked"
+        )
+
+    def test_neither_source_can_kill_the_worker(self):
+        """This runs on a bare thread; an escaping exception would be an unraisable traceback."""
+        handlers = [
+            node
+            for node in ast.walk(self._request_media())
+            if isinstance(node, ast.ExceptHandler)
+        ]
+
+        assert len(handlers) >= 2, (
+            f"only {len(handlers)} guarded call(s); each of the two fetches needs one"
+        )
+
+    def test_the_fallback_is_reached_only_when_omnia_returns_nothing(self):
+        """Falling through on a SUCCESSFUL fetch would double every image request."""
+        source = ast.unparse(self._request_media())
+
+        assert "if data is None" in source, (
+            "the AnkiConnect call is not gated on omnia having failed"
+        )

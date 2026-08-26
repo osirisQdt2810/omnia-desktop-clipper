@@ -91,6 +91,15 @@ class LookupService(QObject):
 
         self._spawn(work)
 
+    def media(self, filename: str) -> bytes | None:
+        """Return a collection-media file's bytes from omnia, or ``None``.
+
+        Synchronous on purpose: the only caller already runs on its own worker thread, because
+        the bytes become a QPixmap and that is main-thread-only. Wrapping it in another thread
+        would buy nothing and cost a second hop back.
+        """
+        return self._client.media(filename)
+
     @staticmethod
     def _spawn(work) -> None:
         threading.Thread(target=work, name="omnia-lookup", daemon=True).start()
