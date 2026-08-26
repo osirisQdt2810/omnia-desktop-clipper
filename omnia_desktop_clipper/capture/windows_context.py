@@ -75,8 +75,22 @@ _UIA_BUDGET_SECONDS = 1.0
 
 #: How far to look for the viewer's page-number control. It sits in the toolbar, so a few
 #: levels and a few dozen nodes is generous; this runs before the "+" appears.
+#: How far up to look for the owning window. Deep enough for a tabbed viewer's page view,
+#: shallow enough that a pathological tree cannot turn this into a walk.
+_MAX_WINDOW_HOPS = 16
+
 _PAGE_SCAN_NODES = 120
 _PAGE_SCAN_DEPTH = 5
+
+#: The PDF route's OWN wall clock, started when it begins.
+#:
+#: It cannot live off what the UIA searches leave behind, because this module documents those
+#: searches as CONSUMING the budget in exactly the case the PDF route exists for: "in a PDF
+#: viewer no node exposes text, so the point route spends its whole node budget finding
+#: nothing". Gating the route on the remainder meant it never ran on the gesture it targets --
+#: the feature was dead in its target case and the suite could not see it, because every test
+#: stubbed the searches to return instantly.
+_PDF_BUDGET_SECONDS = 1.0
 
 #: A page reading is the WHOLE text of its control, not a substring of it. A date in a
 #: comments pane ("9/12/2025") or a sentence mentioning "1 of 3" is not a page number.
@@ -278,14 +292,14 @@ class WindowsUIAContextProvider(ContextProvider):
                 located = self._context_from_focus(selection)
                 if located:
                     return located
-            if self._out_of_time():
-                # The PDF route reads files and queries WMI. Starting it with the budget
-                # already gone is how a capture ends up costing seconds -- the deadline has to
-                # gate the whole capture, not just the UIA half.
-                return selection
             # UI Automation gave nothing. In a PDF that is not a gap to work around but a hard
             # wall -- measured, Foxit exposes no text for any node in its window -- so read the
             # document itself, exactly as the macOS backend does with Preview.
+            #
+            # A FRESH deadline, not the remainder: see _PDF_BUDGET_SECONDS. Bounded all the
+            # same, so a capture is still bounded end to end -- just by two budgets rather than
+            # one that the first half is expected to exhaust.
+            self._deadline = time.monotonic() + _PDF_BUDGET_SECONDS
             return self._pdf_context(selection) or selection
         finally:
             self._deadline = None
@@ -418,6 +432,37 @@ class WindowsUIAContextProvider(ContextProvider):
         except Exception:
             return ""
 
+    def _top_level_window(self, element: Any) -> Any:
+        """Climb from ``element`` to the window that owns it, or ``None``.
+
+        Not ``_ancestors_of(...)[-1]``. That chain is capped at ``_MAX_ANCESTOR_HOPS`` because
+        it feeds the text SEARCH, where looking further up starts returning the whole window;
+        the last element of a three-hop chain is the window only when focus happened to be
+        within three levels of it. A tabbed viewer puts the page view four or more levels down
+        (window -> client pane -> tab container -> document pane -> page view), and the title
+        read off that chain is an inner pane's name -- usually empty.
+
+        This climb is a different job with a different stop: it goes up until the parent is the
+        desktop, which is the definition of a top-level window.
+        """
+        try:
+            automation, _module = self._uia()
+            walker = automation.ControlViewWalker
+            root = automation.GetRootElement()
+            node = element
+            for _ in range(_MAX_WINDOW_HOPS):
+                if self._out_of_time():
+                    return None
+                parent = walker.GetParentElement(node)
+                if not parent:
+                    return None
+                if automation.CompareElements(parent, root):
+                    return node
+                node = parent
+        except Exception:
+            return None
+        return None
+
     def _page_number_from_ui(self) -> Optional[tuple[int, int]]:
         """The ``(page, total)`` the viewer says it is showing, read from its own toolbar.
 
@@ -439,8 +484,7 @@ class WindowsUIAContextProvider(ContextProvider):
             element = automation.GetFocusedElement()
             if not element:
                 return None
-            roots = self._ancestors_of(element)
-            window = roots[-1] if roots else None
+            window = self._top_level_window(element)
             if window is None:
                 return None
             queue = [(window, 0)]
@@ -473,14 +517,11 @@ class WindowsUIAContextProvider(ContextProvider):
             element = automation.GetFocusedElement()
             if not element:
                 return ""
-            # Climb to the top-level window: the focused element is usually a control inside it,
-            # and only the window carries the document title.
-            chain = self._ancestors_of(element)
-            for node in reversed(chain):
-                name = str(node.CurrentName or "")
-                if name:
-                    return name
-            return ""
+            # The WINDOW carries the document title; an inner pane usually carries nothing.
+            window = self._top_level_window(element)
+            if window is None:
+                return ""
+            return str(window.CurrentName or "")
         except Exception:
             return ""
 

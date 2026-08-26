@@ -19,10 +19,15 @@ from omnia_desktop_clipper.capture.windows_context import WindowsUIAContextProvi
 
 
 class _Node:
-    """A UIA element stand-in: some text, some children."""
+    """A UIA element stand-in: some text, some children.
+
+    `CurrentName` mirrors `text` because a real element has it and the code reads it directly
+    when it wants a window's title -- a fake without it makes that path untestable.
+    """
 
     def __init__(self, text: str = "", children: list | None = None) -> None:
         self.text = text
+        self.CurrentName = text
         self.children = children or []
         self.parent: _Node | None = None
         for child in self.children:
@@ -929,37 +934,65 @@ class TestNoPageMeansNoRoute:
         )
 
 
-class TestTheBudgetCoversThePdfRoute:
-    def test_an_expired_budget_skips_the_pdf_route_entirely(
+class TestThePdfRouteHasItsOwnBudget:
+    """The UIA searches are documented to CONSUME the budget in exactly the PDF case.
+
+    "in a PDF viewer no node exposes text, so the point route spends its whole node budget
+    finding nothing" -- so gating the PDF route on the remainder meant it never ran on the
+    gesture it targets. The previous version of this class asserted that gating as correct,
+    which is how a dead feature kept a green suite.
+    """
+
+    def test_a_spent_uia_budget_does_not_stop_the_pdf_route(
         self, tmp_path, monkeypatch
     ) -> None:
-        """It reads files and queries WMI; starting it with the budget gone is how a capture
-        ends up costing seconds."""
         import time
 
         provider = TestThePdfFallback._provider(
-            tmp_path, monkeypatch, ["The word is here."]
+            tmp_path, monkeypatch, ["The document sentence about policy. Trailing."]
         )
         provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
         provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
 
         def spend(_selection):
-            provider._deadline = time.monotonic() - 1
+            provider._deadline = time.monotonic() - 1  # the UIA half is exhausted
             return ""
 
         provider._context_from_focus = spend  # type: ignore[method-assign]
-        reached = {"pdf": False}
+
+        assert provider.resolve("policy", position=(1, 2)) == (
+            "The document sentence about policy."
+        )
+
+    def test_the_pdf_route_starts_with_time_on_the_clock(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A fresh deadline, not the leftover -- and still a deadline, so it stays bounded."""
+        import time
+
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["The word is here."]
+        )
+        seen = {}
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
 
         def pdf(_selection):
-            reached["pdf"] = True
-            return "should not be reached"
+            seen["deadline"] = provider._deadline
+            seen["spent"] = provider._out_of_time()
+            return ""
 
         provider._pdf_context = pdf  # type: ignore[method-assign]
 
-        assert provider.resolve("word", position=(1, 2)) == "word"
-        assert not reached["pdf"]
+        provider.resolve("word", position=(1, 2))
 
-    def test_pdf_context_checks_the_budget_itself(self, tmp_path, monkeypatch) -> None:
+        assert seen["deadline"] is not None, "the PDF route ran unbounded"
+        assert not seen["spent"], "the PDF route started with no time left"
+
+    def test_pdf_context_still_checks_its_own_budget(
+        self, tmp_path, monkeypatch
+    ) -> None:
         import time
 
         provider = TestThePdfFallback._provider(
@@ -968,6 +1001,67 @@ class TestTheBudgetCoversThePdfRoute:
         provider._deadline = time.monotonic() - 1
 
         assert provider._pdf_context("word") == ""
+
+
+class TestClimbingToTheWindow:
+    """`_ancestors_of(...)[-1]` is not the window -- that chain is capped at three hops."""
+
+    @staticmethod
+    def _tree(depth: int):
+        desktop = _Node("Desktop 1")
+        window = _Node("sample.pdf - Foxit PDF Reader")
+        window.parent = desktop
+        desktop.children.append(window)
+        node = window
+        for level in range(depth):
+            child = _Node("")
+            child.parent = node
+            node.children.append(child)
+            node = child
+        return desktop, window, node
+
+    @staticmethod
+    def _provider(desktop, focused):
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (  # type: ignore[method-assign]
+            _FakeAutomation(focused=focused, root=desktop),
+            _FakeModule(),
+        )
+        provider._text_of = lambda n: getattr(n, "text", "")  # type: ignore[method-assign]
+        return provider
+
+    def test_it_finds_the_window_from_a_deeply_nested_focus(self) -> None:
+        """A tabbed viewer: window -> client pane -> tab container -> document pane -> page."""
+        desktop, window, focused = self._tree(4)
+        provider = self._provider(desktop, focused)
+
+        assert provider._top_level_window(focused) is window
+
+    def test_the_three_hop_search_chain_would_not_have(self) -> None:
+        """Why this exists: the search chain stops short and its last node is an inner pane."""
+        desktop, window, focused = self._tree(4)
+        provider = self._provider(desktop, focused)
+
+        assert provider._ancestors_of(focused)[-1] is not window
+
+    def test_the_title_comes_from_the_window(self) -> None:
+        desktop, _window, focused = self._tree(4)
+        provider = self._provider(desktop, focused)
+
+        assert provider._foreground_title() == "sample.pdf - Foxit PDF Reader"
+
+    def test_a_window_with_no_owner_yields_nothing(self) -> None:
+        orphan = _Node("orphan")
+        provider = self._provider(_Node("Desktop 1"), orphan)
+
+        assert provider._top_level_window(orphan) is None
+
+    def test_the_climb_is_bounded(self) -> None:
+        """A pathological tree must not turn this into a walk."""
+        desktop, _window, focused = self._tree(200)
+        provider = self._provider(desktop, focused)
+
+        assert provider._top_level_window(focused) is None
 
 
 class TestAFindBarIsNotAPageNumber:
