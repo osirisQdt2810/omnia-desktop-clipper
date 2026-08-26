@@ -26,6 +26,9 @@ dependencies = [
     # Without it `pip install .` yields a build whose Windows context lookup fails to import
     # and silently returns the selection -- the bug the backend exists to fix.
     "comtypes>=1.4 ; sys_platform == 'win32'",
+    # PDF text where accessibility exposes none. macOS has PDFKit in the OS; the others need
+    # a library. Pure Python.
+    "pypdf>=4.0 ; sys_platform != 'darwin'",
 ]
 
 [project.scripts]

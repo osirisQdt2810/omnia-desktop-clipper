@@ -21,3 +21,7 @@ pyobjc-framework-ApplicationServices>=10.0 ; sys_platform == "darwin"
 # builds its wrappers with ctypes at runtime), so it adds no compiled wheel to the app.
 # On Linux the clipper still falls back to using the selection as the context.
 comtypes>=1.4 ; sys_platform == "win32"
+
+# Reading a PDF's text where the accessibility layer exposes none. macOS uses PDFKit, which
+# ships with the OS; everywhere else needs a library, and pypdf is pure Python.
+pypdf>=4.0 ; sys_platform != "darwin"

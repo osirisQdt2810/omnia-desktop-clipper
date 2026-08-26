@@ -58,9 +58,12 @@ def config_dir(
 def frontmost_pid() -> int | None:
     """Return the frontmost application's process id, or ``None`` if unavailable.
 
-    macOS only (AppKit ``NSWorkspace``); other platforms have no equivalent the clipper needs,
-    so they get ``None``. Must be called on the main thread — ``NSWorkspace`` is AppKit.
+    macOS reads AppKit's ``NSWorkspace`` (and must be called on the main thread); Windows asks
+    which process owns the foreground window. Linux has no equivalent the clipper needs and
+    gets ``None``.
     """
+    if sys.platform.startswith("win"):
+        return _windows_foreground_pid() or None
     if sys.platform != "darwin":
         return None
     try:
@@ -104,6 +107,35 @@ def frontmost_app_id() -> str:
     return ""
 
 
+def _windows_foreground_pid() -> int:
+    """The pid owning the foreground window, or 0.
+
+    Split out because two callers need it: the process NAME (to tell a browser apart from
+    everything else) and the PDF lookup (which asks WMI for that process's command line). One
+    definition means they can never disagree about which window "frontmost" refers to.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return 0
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:  # identifying the app is a convenience, never a failure
+        return 0
+
+
 def _windows_frontmost_process_name() -> str:
     """The image name of the process owning the foreground window (``""`` on any failure).
 
@@ -117,19 +149,11 @@ def _windows_frontmost_process_name() -> str:
         import ctypes
         from ctypes import wintypes
 
-        user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         # Declare the signatures. Without them ctypes assumes ``c_int``, which TRUNCATES a
-        # 64-bit HWND/HANDLE and sign-extends it back; Windows keeps these values
-        # 32-bit-significant so it happens to work, and that is exactly the kind of thing that
-        # stops happening to work on someone else's machine.
-        user32.GetForegroundWindow.restype = wintypes.HWND
-        user32.GetForegroundWindow.argtypes = []
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.GetWindowThreadProcessId.argtypes = [
-            wintypes.HWND,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
+        # 64-bit HANDLE and sign-extends it back; Windows keeps these values 32-bit-significant
+        # so it happens to work, and that is exactly the kind of thing that stops happening to
+        # work on someone else's machine.
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
@@ -140,16 +164,10 @@ def _windows_frontmost_process_name() -> str:
             ctypes.POINTER(wintypes.DWORD),
         ]
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
+        pid = _windows_foreground_pid()
+        if not pid:
             return ""
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if not pid.value:
-            return ""
-        handle = kernel32.OpenProcess(
-            _PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
-        )
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return ""
         try:

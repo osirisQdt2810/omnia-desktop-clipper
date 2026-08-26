@@ -19,10 +19,15 @@ from omnia_desktop_clipper.capture.windows_context import WindowsUIAContextProvi
 
 
 class _Node:
-    """A UIA element stand-in: some text, some children."""
+    """A UIA element stand-in: some text, some children.
+
+    `CurrentName` mirrors `text` because a real element has it and the code reads it directly
+    when it wants a window's title -- a fake without it makes that path untestable.
+    """
 
     def __init__(self, text: str = "", children: list | None = None) -> None:
         self.text = text
+        self.CurrentName = text
         self.children = children or []
         self.parent: _Node | None = None
         for child in self.children:
@@ -77,7 +82,9 @@ class TestResolve:
 
         assert provider.resolve("fox") == "The quick brown fox jumps over it."
 
-    def test_it_finds_text_several_levels_below_the_focused_element(self) -> None:
+    def test_it_finds_text_several_levels_below_the_focused_element(
+        self, tmp_path
+    ) -> None:
         """Measured shape: the focused element has no text and the document is four down.
 
         Trusting the focused element is what a naive port would do, and on this tree it returns
@@ -554,7 +561,7 @@ class TestRangeFromPoint:
 
         assert provider._paragraph_at_point("fox", (5, 100)) == ""
 
-    def test_an_element_without_a_text_pattern_falls_through(self) -> None:
+    def test_an_element_without_a_text_pattern_falls_through(self, tmp_path) -> None:
         """Most of Chromium. The caller then searches the subtree instead."""
         provider = WindowsUIAContextProvider()
         automation = _FakeAutomation(at_point=_Node("no text pattern here"))
@@ -654,3 +661,752 @@ class TestItDoesNotSitOnTheQtThread:
 
         assert seen["deadline"] is not None, "no budget was set for the capture"
         assert provider._deadline is None, "the budget outlived the capture"
+
+
+class _FakeEngine:
+    """A PDF whose pages are just strings, so the reader can be driven without a file."""
+
+    def __init__(self, pages) -> None:
+        self.pages = pages
+        self.opened: list = []
+
+    def open(self, path):
+        self.opened.append(path)
+        return object() if self.pages is not None else None
+
+    def page_count(self, _document) -> int:
+        return len(self.pages)
+
+    def page_text(self, _document, index: int) -> str:
+        return self.pages[index]
+
+
+class TestThePdfFallback:
+    """When UIA exposes no text at all -- measured: a real viewer exposes none for any node."""
+
+    @staticmethod
+    def _provider(
+        tmp_path, monkeypatch, pages, *, title="sample.pdf - Page 1 of 1", pid=4242
+    ):
+        """A provider whose PDF reader is driven by a fake engine over a REAL file path.
+
+        The path has to exist: PdfTextReader keys its cache on the file's mtime, so a made-up
+        path returns "cannot read" before the engine is ever consulted -- and the test would
+        then pass for the wrong reason.
+
+        The default title carries a PAGE. It did not until the whole-document fallback was
+        removed, and that is why these tests passed while the route they exercised would have
+        extracted every page of a 300-page document on the Qt main thread.
+        """
+        import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
+        import omnia_desktop_clipper.platform as platform_module
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        document = tmp_path / "sample.pdf"
+        document.write_bytes(bytes.fromhex("255044462d312e340a"))
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
+        # The route resolves the window once and reads the title off it, so the stand-in is
+        # the window rather than a title string.
+        provider._top_level_window = lambda _element: _Node(title)  # type: ignore[method-assign]
+        provider._pdf_reader = PdfTextReader(_FakeEngine(pages))
+        # monkeypatch, not a bare assignment: a rebound module global outlives the test and
+        # the next one to touch frontmost_pid then passes or fails by collection order, with
+        # the cause nowhere near the failure.
+        monkeypatch.setattr(
+            windows_pdf,
+            "open_pdf_for",
+            lambda _pid, _title, _timeout=None: str(document),
+        )
+        monkeypatch.setattr(platform_module, "frontmost_pid", lambda: pid)
+        return provider
+
+    def test_it_reads_the_sentence_out_of_the_document(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = self._provider(
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse of the cell. And more."],
+        )
+
+        assert provider._pdf_context("mitochondrion") == (
+            "The mitochondrion is the powerhouse of the cell."
+        )
+
+    def test_a_word_that_repeats_on_the_page_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The safety property, and the reason this reads a PAGE rather than a document.
+
+        "inference" occurs 154 times in a real dissertation; a whole-document search returns
+        the title page -- a plausible sentence the reader never saw. Ambiguous means silence.
+        """
+        provider = self._provider(
+            tmp_path, monkeypatch, ["The cell divides. A second cell appears."]
+        )
+
+        assert provider._pdf_context("cell") == ""
+
+    def test_a_word_that_is_not_in_the_document_yields_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = self._provider(
+            tmp_path, monkeypatch, ["Nothing relevant here at all."]
+        )
+
+        assert provider._pdf_context("mitochondrion") == ""
+
+    def test_no_pdf_on_screen_yields_nothing(self, tmp_path, monkeypatch) -> None:
+        import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
+
+        provider = self._provider(tmp_path, monkeypatch, ["Some text."])
+        monkeypatch.setattr(
+            windows_pdf, "open_pdf_for", lambda _pid, _title, _timeout=None: None
+        )
+
+        assert provider._pdf_context("Some") == ""
+
+    def test_a_non_pdf_path_is_refused(self, tmp_path, monkeypatch) -> None:
+        """`is_pdf` is defence in depth, and this pins it as such.
+
+        Production cannot currently reach it: pdf_path_from_command_line only ever returns
+        strings its own .pdf regex matched. The guard is kept for the next caller, and the
+        test says so rather than implying it catches something live.
+
+        The decoy EXISTS on disk on purpose. A made-up path is rejected by the mtime lookup
+        before is_pdf is ever consulted, so the test would pass with the guard deleted -- which
+        is exactly what mutation testing showed.
+        """
+        import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
+
+        decoy = tmp_path / "notes.txt"
+        decoy.write_text("Some text here.", encoding="utf-8")
+        provider = self._provider(tmp_path, monkeypatch, ["Some text here."])
+        monkeypatch.setattr(
+            windows_pdf, "open_pdf_for", lambda _pid, _title, _timeout=None: str(decoy)
+        )
+
+        assert provider._pdf_context("text") == ""
+
+    def test_resolve_falls_through_to_it_when_uia_finds_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The wiring: a PDF viewer's tree yields nothing, so resolve must reach the document."""
+        provider = self._provider(
+            tmp_path, monkeypatch, ["The document sentence about policy. Trailing."]
+        )
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
+
+        assert provider.resolve("policy", position=(1, 2)) == (
+            "The document sentence about policy."
+        )
+
+    def test_the_selection_survives_when_the_document_cannot_be_read(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = self._provider(tmp_path, monkeypatch, None)
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
+
+        assert provider.resolve("policy", position=(1, 2)) == "policy"
+
+
+class _PageElement:
+    """A toolbar control that reports the current page the way a viewer's does."""
+
+    def __init__(self, value: str) -> None:
+        self.CurrentName = value
+        self.children: list = []
+        self.parent = None
+
+    def GetCurrentPattern(self, _id):  # noqa: N802 - UIA's own spelling
+        return None
+
+
+class TestThePageNumber:
+    """Where the page comes from, and what happens when there is none.
+
+    macOS reads it from the window title because Preview puts it there. No Windows viewer does
+    -- Foxit, Acrobat Reader and Edge all title their windows "<file>.pdf - <viewer>" -- but
+    they all SHOW it, and UIA exposes it: measured in Foxit, a toolbar element answers "1 / 1".
+    """
+
+    @staticmethod
+    def _provider_with_toolbar(page_text):
+        toolbar = _PageElement(page_text) if page_text is not None else _Node("")
+        window = _Node("sample.pdf - Foxit PDF Reader", [toolbar])
+        focused = _Node("", [])
+        focused.parent = window
+        window.children.append(focused)
+        desktop = _Node("Desktop 1", [window])
+        window.parent = desktop
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (  # type: ignore[method-assign]
+            _FakeAutomation(focused=focused, root=desktop),
+            _FakeModule(),
+        )
+        provider._text_of = lambda node: getattr(  # type: ignore[method-assign]
+            node, "CurrentName", None
+        ) or getattr(node, "text", "")
+        return provider, window
+
+    def test_it_reads_the_page_from_the_viewer_toolbar(self) -> None:
+        provider, window = self._provider_with_toolbar("7 / 90")
+
+        assert provider._page_number_from_ui(window) == (7, 90)
+
+    def test_the_of_form_works_too(self) -> None:
+        provider, window = self._provider_with_toolbar("Page 12 of 40")
+
+        assert provider._page_number_from_ui(window) == (12, 40)
+
+    def test_no_page_control_yields_none(self) -> None:
+        provider, window = self._provider_with_toolbar(None)
+
+        assert provider._page_number_from_ui(window) is None
+
+    def test_a_spent_budget_stops_the_scan(self) -> None:
+        import time
+
+        provider, window = self._provider_with_toolbar("7 / 90")
+        provider._deadline = time.monotonic() - 1
+
+        assert provider._page_number_from_ui(window) is None
+
+
+class TestNoPageMeansNoRoute:
+    """The whole-document fallback is gone, and this is why.
+
+    Extracting every page with pypdf runs on the Qt main thread before the "+" appears -- about
+    six seconds for a 300-page thesis, on EVERY capture -- and then hands the uniqueness gate a
+    haystack so large that almost any real word repeats, so it returns nothing anyway. The user
+    would pay the freeze and get no context.
+    """
+
+    def test_a_document_with_no_known_page_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse."],
+            title="sample.pdf - Viewer",
+        )
+        provider._page_number_from_ui = lambda _window: None  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == ""
+
+    def test_the_document_is_never_opened_when_the_page_is_unknown(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Not merely a different answer -- the expensive work must not start."""
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        opened: list = []
+
+        class _Recording(_FakeEngine):
+            def open(self, path):
+                opened.append(path)
+                return super().open(path)
+
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["Some text."], title="sample.pdf - Viewer"
+        )
+        provider._pdf_reader = PdfTextReader(_Recording(["Some text."]))
+        provider._page_number_from_ui = lambda _window: None  # type: ignore[method-assign]
+
+        provider._pdf_context("text")
+
+        assert opened == [], "the PDF was read despite the page being unknown"
+
+    def test_the_ui_page_rescues_a_title_without_one(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The common Windows case: the title has no page, the toolbar does."""
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["ignored page one", "The mitochondrion is the powerhouse. Trailing."],
+            title="sample.pdf - Foxit PDF Reader",
+        )
+        provider._page_number_from_ui = lambda _window: (2, 2)  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == (
+            "The mitochondrion is the powerhouse."
+        )
+
+
+class TestThePdfRouteHasItsOwnBudget:
+    """The UIA searches are documented to CONSUME the budget in exactly the PDF case.
+
+    "in a PDF viewer no node exposes text, so the point route spends its whole node budget
+    finding nothing" -- so gating the PDF route on the remainder meant it never ran on the
+    gesture it targets. The previous version of this class asserted that gating as correct,
+    which is how a dead feature kept a green suite.
+    """
+
+    def test_a_spent_uia_budget_does_not_stop_the_pdf_route(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import time
+
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["The document sentence about policy. Trailing."]
+        )
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+
+        def spend(_selection):
+            provider._deadline = time.monotonic() - 1  # the UIA half is exhausted
+            return ""
+
+        provider._context_from_focus = spend  # type: ignore[method-assign]
+
+        assert provider.resolve("policy", position=(1, 2)) == (
+            "The document sentence about policy."
+        )
+
+    def test_the_pdf_route_starts_with_time_on_the_clock(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A fresh deadline, not the leftover -- and still a deadline, so it stays bounded."""
+
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["The word is here."]
+        )
+        seen = {}
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
+
+        def pdf(_selection):
+            seen["deadline"] = provider._deadline
+            seen["spent"] = provider._out_of_time()
+            return ""
+
+        provider._pdf_context = pdf  # type: ignore[method-assign]
+
+        provider.resolve("word", position=(1, 2))
+
+        assert seen["deadline"] is not None, "the PDF route ran unbounded"
+        assert not seen["spent"], "the PDF route started with no time left"
+
+    def test_pdf_context_still_checks_its_own_budget(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import time
+
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["The word is here."]
+        )
+        provider._deadline = time.monotonic() - 1
+
+        assert provider._pdf_context("word") == ""
+
+
+class TestClimbingToTheWindow:
+    """`_ancestors_of(...)[-1]` is not the window -- that chain is capped at three hops."""
+
+    @staticmethod
+    def _tree(depth: int):
+        desktop = _Node("Desktop 1")
+        window = _Node("sample.pdf - Foxit PDF Reader")
+        window.parent = desktop
+        desktop.children.append(window)
+        node = window
+        for _level in range(depth):
+            child = _Node("")
+            child.parent = node
+            node.children.append(child)
+            node = child
+        return desktop, window, node
+
+    @staticmethod
+    def _provider(desktop, focused):
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (  # type: ignore[method-assign]
+            _FakeAutomation(focused=focused, root=desktop),
+            _FakeModule(),
+        )
+        provider._text_of = lambda n: getattr(n, "text", "")  # type: ignore[method-assign]
+        return provider
+
+    def test_it_finds_the_window_from_a_deeply_nested_focus(self) -> None:
+        """A tabbed viewer: window -> client pane -> tab container -> document pane -> page."""
+        desktop, window, focused = self._tree(4)
+        provider = self._provider(desktop, focused)
+
+        assert provider._top_level_window(focused) is window
+
+    def test_the_three_hop_search_chain_would_not_have(self) -> None:
+        """Why this exists: the search chain stops short and its last node is an inner pane."""
+        desktop, window, focused = self._tree(4)
+        provider = self._provider(desktop, focused)
+
+        assert provider._ancestors_of(focused)[-1] is not window
+
+    def test_the_window_carries_the_title(self) -> None:
+        """The route reads CurrentName off whatever this climb returns."""
+        desktop, _window, focused = self._tree(4)
+        provider = self._provider(desktop, focused)
+
+        found = provider._top_level_window(focused)
+
+        assert found is not None
+        assert found.CurrentName == "sample.pdf - Foxit PDF Reader"
+
+    def test_a_window_with_no_owner_yields_nothing(self) -> None:
+        orphan = _Node("orphan")
+        provider = self._provider(_Node("Desktop 1"), orphan)
+
+        assert provider._top_level_window(orphan) is None
+
+    def test_the_climb_is_bounded(self) -> None:
+        """A pathological tree must not turn this into a walk."""
+        desktop, _window, focused = self._tree(200)
+        provider = self._provider(desktop, focused)
+
+        assert provider._top_level_window(focused) is None
+
+
+class TestAFindBarIsNotAPageNumber:
+    """The reading has to be CHECKED, because a find bar has the same shape as a page box.
+
+    Ctrl-F then double-click is an ordinary reading gesture, not an edge case. Foxit and
+    Acrobat both put the find counter ("3 of 17") in the same toolbar as the page box
+    ("40 / 90"), and nothing about the text tells them apart. Believing the wrong one returns a
+    sentence from a page the reader never looked at -- and the uniqueness gate cannot catch it,
+    because uniqueness on the wrong page is still uniqueness.
+    """
+
+    def test_a_total_that_disagrees_with_the_document_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["page one text", "page two mentions mitochondrion once.", "page three"],
+            title="thesis.pdf - Foxit PDF Reader",
+        )
+        # A find bar on a 3-page document: "2 of 17" cannot be a page reading.
+        provider._page_number_from_ui = lambda _window: (2, 17)  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == ""
+
+    def test_a_total_that_matches_is_believed(self, tmp_path, monkeypatch) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["page one text", "page two mentions mitochondrion once.", "page three"],
+            title="thesis.pdf - Foxit PDF Reader",
+        )
+        provider._page_number_from_ui = lambda _window: (2, 3)  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == (
+            "page two mentions mitochondrion once."
+        )
+
+    def test_the_whole_text_must_be_the_reading(self) -> None:
+        """A date in a comments pane, or a sentence that merely contains "1 of 3"."""
+        provider, window = TestThePageNumber._provider_with_toolbar(
+            "Reviewed 9/12/2025 by QA"
+        )
+
+        assert provider._page_number_from_ui(window) is None
+
+    def test_a_page_prefixed_reading_is_still_a_reading(self) -> None:
+        """ "Page 12 of 40" is a real page-box format; only substrings are refused."""
+        provider, window = TestThePageNumber._provider_with_toolbar("Page 12 of 40")
+
+        assert provider._page_number_from_ui(window) == (12, 40)
+
+
+class TestTheCheapCheckComesFirst:
+    """Deciding "is this even a PDF window?" costs a regex; the page scan costs COM calls."""
+
+    def test_a_window_with_no_pdf_in_its_title_never_scans_for_a_page(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["Some text."], title="Untitled - Paint"
+        )
+        scanned = {"n": 0}
+
+        def counting(_window):
+            scanned["n"] += 1
+            return None
+
+        provider._page_number_from_ui = counting  # type: ignore[method-assign]
+
+        assert provider._pdf_context("text") == ""
+        assert (
+            scanned["n"] == 0
+        ), "the window tree was walked before a regex could have ruled the window out"
+
+
+class TestTheWmiLookupIsBounded:
+    """Neither CoGetObject nor ExecQuery has a timeout, and this runs on the Qt main thread.
+
+    A deadline checked around a call cannot interrupt one already in flight, so the bound has
+    to be a worker with a hard cutoff. Without it, a contended `winmgmt` -- an inventory agent
+    enumerating Win32_Process, or the service restarting after a repository check -- freezes the
+    tray on every capture while the condition lasts. That is a hang, not the "worse card" this
+    module's failure contract promises.
+    """
+
+    @staticmethod
+    def _clear_cache():
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+
+    def test_a_hung_query_costs_a_miss_not_a_freeze(self, monkeypatch) -> None:
+        import time
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        monkeypatch.setattr(module, "_WMI_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: time.sleep(5) or "never"
+        )
+
+        started = time.monotonic()
+        answer = module.foreground_command_line(4242)
+        elapsed = time.monotonic() - started
+
+        assert answer == ""
+        assert elapsed < 1.0, f"the caller waited {elapsed:.2f}s on a hung WMI"
+
+    def test_the_answer_is_cached_per_process(self, monkeypatch) -> None:
+        """A process's command line never changes, so a viewer is asked once, not per capture."""
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        calls = {"n": 0}
+
+        def counting(_pid):
+            calls["n"] += 1
+            return '"v.exe" "C:\\docs\\a.pdf"'
+
+        monkeypatch.setattr(module, "_query_command_line", counting)
+
+        for _ in range(5):
+            assert module.foreground_command_line(4242) == '"v.exe" "C:\\docs\\a.pdf"'
+        assert calls["n"] == 1
+
+    def test_a_timeout_is_not_cached(self, monkeypatch) -> None:
+        """One bad moment must not become permanent for that process."""
+        import time
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        monkeypatch.setattr(module, "_WMI_TIMEOUT_SECONDS", 0.05)
+        state = {"hang": True}
+
+        def flaky(_pid):
+            if state["hang"]:
+                time.sleep(5)
+            return "recovered"
+
+        monkeypatch.setattr(module, "_query_command_line", flaky)
+
+        assert module.foreground_command_line(7) == ""
+        state["hang"] = False
+        assert module.foreground_command_line(7) == "recovered"
+
+    def test_the_cache_is_bounded(self, monkeypatch) -> None:
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        monkeypatch.setattr(module, "_query_command_line", lambda pid: f"cmd-{pid}")
+
+        for pid in range(200):
+            module.foreground_command_line(pid + 1)
+
+        assert len(module._COMMAND_LINE_CACHE) <= module._COMMAND_LINE_CACHE_SIZE
+
+    def test_no_pid_asks_nothing(self, monkeypatch) -> None:
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        asked = {"n": 0}
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: asked.update(n=1) or ""
+        )
+
+        assert module.foreground_command_line(0) == ""
+        assert asked["n"] == 0
+
+
+class TestTheWindowIsResolvedOnce:
+    """Both the title and the page reading come off one element.
+
+    Resolving it twice paid the 16-hop climb twice on every PDF capture -- the common case,
+    since no Windows viewer puts the page in its title -- and left room for the two lookups to
+    land on different windows if focus moved mid-capture.
+    """
+
+    def test_the_climb_happens_once_per_capture(self, tmp_path, monkeypatch) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse."],
+            title="sample.pdf - Foxit PDF Reader",
+        )
+        climbs = {"n": 0}
+
+        def counting(_element):
+            climbs["n"] += 1
+            return _Node("sample.pdf - Foxit PDF Reader")
+
+        provider._top_level_window = counting  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: (1, 1)  # type: ignore[method-assign]
+
+        provider._pdf_context("mitochondrion")
+
+        assert climbs["n"] == 1, f"the window was resolved {climbs['n']} times"
+
+    def test_the_page_scan_is_given_the_same_window(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse."],
+            title="sample.pdf - Foxit PDF Reader",
+        )
+        window = _Node("sample.pdf - Foxit PDF Reader")
+        provider._top_level_window = lambda _element: window  # type: ignore[method-assign]
+        seen = {}
+
+        def scan(given):
+            seen["window"] = given
+            return (1, 1)
+
+        provider._page_number_from_ui = scan  # type: ignore[method-assign]
+
+        provider._pdf_context("mitochondrion")
+
+        assert seen["window"] is window
+
+
+class TestTheWorkerDoesNotHoldTheProcessOpen:
+    """A ThreadPoolExecutor would, which is why this uses a bare daemon thread.
+
+    `concurrent.futures.thread` registers an atexit hook that JOINS every worker still running,
+    and its workers are non-daemon -- so `shutdown(wait=False)` frees the caller but not the
+    process. Quitting the clipper would block in finalisation until the hung COM call returned:
+    tray icon gone, process alive, still holding the global hotkey, and a relaunch colliding
+    with it. The same hang, moved to the moment it looks least explicable.
+    """
+
+    def test_the_worker_is_a_daemon(self, monkeypatch) -> None:
+        import threading
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+        started: list = []
+        real_thread = threading.Thread
+
+        def recording(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            started.append(thread)
+            return thread
+
+        monkeypatch.setattr(threading, "Thread", recording)
+        monkeypatch.setattr(module, "_query_command_line", lambda _pid: "cmd")
+
+        module.foreground_command_line(4242)
+
+        assert started, "no worker was started"
+        assert all(t.daemon for t in started), (
+            "a non-daemon worker is joined at interpreter exit, so a hung WMI call would keep "
+            "the process alive after the user quits"
+        )
+
+    def test_a_zero_or_negative_budget_asks_nothing(self, monkeypatch) -> None:
+        """The caller passes what is left of its deadline; nothing left means no call."""
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+        asked = {"n": 0}
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: asked.update(n=1) or "cmd"
+        )
+
+        assert module.foreground_command_line(4242, timeout=0.0) == ""
+        assert asked["n"] == 0
+
+    def test_the_callers_budget_is_used_as_the_timeout(self, monkeypatch) -> None:
+        """A fixed constant LARGER than the route's budget made its docstring untrue."""
+        import time
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: time.sleep(5) or "x"
+        )
+
+        started = time.monotonic()
+        assert module.foreground_command_line(4242, timeout=0.05) == ""
+        assert time.monotonic() - started < 1.0
+
+
+class TestADamagedDocumentIsNotReparsedEveryCapture:
+    """`PdfTextReader.document` cached only successes.
+
+    A partial download or a scanner-made file with a broken startxref sends pypdf into
+    rebuilding the xref table, which reads the whole file in Python looking for object markers
+    -- seconds of CPU on a large scan, on the Qt main thread. Caching only successes meant
+    paying that again on every capture for as long as the document stayed open.
+    """
+
+    def test_a_failure_is_parsed_once_per_mtime(self, tmp_path) -> None:
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        document = tmp_path / "broken.pdf"
+        document.write_bytes(bytes.fromhex("255044462d312e340a"))
+        attempts = {"n": 0}
+
+        class _Failing(_FakeEngine):
+            def open(self, path):
+                attempts["n"] += 1
+                return None
+
+        reader = PdfTextReader(_Failing([]))
+
+        for _ in range(5):
+            assert reader.page_texts(str(document), 1) == []
+        assert (
+            attempts["n"] == 1
+        ), f"the broken document was parsed {attempts['n']} times"
+
+    def test_an_edited_document_is_read_again(self, tmp_path) -> None:
+        """The cache keys on mtime, so a file that changes is not written off for ever."""
+        import os
+
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        document = tmp_path / "fixed.pdf"
+        document.write_bytes(bytes.fromhex("255044462d312e340a"))
+        attempts = {"n": 0}
+
+        class _Counting(_FakeEngine):
+            def open(self, path):
+                attempts["n"] += 1
+                return super().open(path)
+
+        reader = PdfTextReader(_Counting(["The word is here."]))
+        reader.page_texts(str(document), 1)
+        os.utime(str(document), (0, 0))
+        reader.page_texts(str(document), 1)
+
+        assert attempts["n"] == 2

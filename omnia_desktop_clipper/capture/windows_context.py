@@ -37,6 +37,7 @@ not a crash.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
@@ -47,6 +48,12 @@ from .context import (
     ContextProvider,
     find_text_containing,
     sentence_around,
+)
+from .pdf_context import (
+    PdfTextReader,
+    is_pdf,
+    parse_page_position,
+    unique_occurrence,
 )
 
 #: ``CUIAutomation``'s class id. Hard-coded because there is nothing to look it up from: the
@@ -66,6 +73,32 @@ _CUIAUTOMATION8_CLSID = "{e22ad333-b25f-460c-83d0-0581107395c9}"
 #: what keeps the "+" appearing promptly rather than after the slowest app on the machine.
 _UIA_BUDGET_SECONDS = 1.0
 
+#: How far up to look for the owning window. Deep enough for a tabbed viewer's page view,
+#: shallow enough that a pathological tree cannot turn this into a walk.
+_MAX_WINDOW_HOPS = 16
+
+#: How far to look for the viewer's page-number control. It sits in the toolbar, so a few
+#: levels and a few dozen nodes is generous; this runs before the "+" appears.
+
+_PAGE_SCAN_NODES = 120
+_PAGE_SCAN_DEPTH = 5
+
+#: The PDF route's OWN wall clock, started when it begins. Smaller than the UIA budget on
+#: purpose: its measured cost is ~86 ms of WMI plus a bounded 120-node scan, so a whole
+#: second would only widen the worst case a capture can reach.
+#:
+#: It cannot live off what the UIA searches leave behind, because this module documents those
+#: searches as CONSUMING the budget in exactly the case the PDF route exists for: "in a PDF
+#: viewer no node exposes text, so the point route spends its whole node budget finding
+#: nothing". Gating the route on the remainder meant it never ran on the gesture it targets --
+#: the feature was dead in its target case and the suite could not see it, because every test
+#: stubbed the searches to return instantly.
+_PDF_BUDGET_SECONDS = 0.3
+
+#: A page reading is the WHOLE text of its control, not a substring of it. A date in a
+#: comments pane ("9/12/2025") or a sentence mentioning "1 of 3" is not a page number.
+_PAGE_READING_RE = re.compile(r"(?:page\s*)?\d+\s*(?:of|/)\s*\d+", re.IGNORECASE)
+
 #: UIA's TextUnit_Paragraph. Used with ``RangeFromPoint`` to read the text AT the cursor.
 _TEXT_UNIT_PARAGRAPH = 4
 
@@ -84,6 +117,9 @@ class WindowsUIAContextProvider(ContextProvider):
         self._module: Any = None
         # Set for the duration of one resolve(); see _UIA_BUDGET_SECONDS.
         self._deadline: Optional[float] = None
+        # Caches the opened PDF between captures; re-opening a 90-page document each time would
+        # be wasteful, and the reader keys on mtime so an edited file is still re-read.
+        self._pdf_reader = PdfTextReader()
 
     # -- COM plumbing -------------------------------------------------------------------------
 
@@ -128,6 +164,12 @@ class WindowsUIAContextProvider(ContextProvider):
             return client.CreateObject(
                 _CUIAUTOMATION_CLSID, interface=module.IUIAutomation
             )
+
+    def _time_left(self) -> float:
+        """Seconds remaining in the current budget (0.0 when there is none set or none left)."""
+        if self._deadline is None:
+            return 0.0
+        return max(0.0, self._deadline - time.monotonic())
 
     def _out_of_time(self) -> bool:
         """Whether this capture has spent its UIA budget."""
@@ -255,13 +297,19 @@ class WindowsUIAContextProvider(ContextProvider):
                 located = self._context_at_position(selection, position)
                 if located:
                     return located
-            if self._out_of_time():
-                # The point route can spend the whole budget finding nothing -- that is the
-                # PDF case. Starting a second full search then doubles the wait for a result
-                # that is already known to be unlikely.
-                return selection
-            located = self._context_from_focus(selection)
-            return located or selection
+            if not self._out_of_time():
+                located = self._context_from_focus(selection)
+                if located:
+                    return located
+            # UI Automation gave nothing. In a PDF that is not a gap to work around but a hard
+            # wall -- measured, Foxit exposes no text for any node in its window -- so read the
+            # document itself, exactly as the macOS backend does with Preview.
+            #
+            # A FRESH deadline, not the remainder: see _PDF_BUDGET_SECONDS. Bounded all the
+            # same, so a capture is still bounded end to end -- just by two budgets rather than
+            # one that the first half is expected to exhaust.
+            self._deadline = time.monotonic() + _PDF_BUDGET_SECONDS
+            return self._pdf_context(selection) or selection
         finally:
             self._deadline = None
 
@@ -335,6 +383,143 @@ class WindowsUIAContextProvider(ContextProvider):
             return self._sentence_in(self._ancestors_of(element), selection)
         except Exception:
             return ""
+
+    def _pdf_context(self, selection: str) -> str:
+        """The enclosing sentence read from the open PDF, or ``""``.
+
+        The page is what makes this safe. A word like "inference" occurs 154 times in a real
+        dissertation, and a whole-document search happily returns the title page -- a plausible
+        sentence the reader never saw. Restricted to the page on screen, the same lookup returns
+        what they were looking at. macOS gets that page from the window title and so does this;
+        the difference is only where the FILE comes from (see :mod:`windows_pdf`).
+        """
+        from ..platform import frontmost_pid
+        from .windows_pdf import open_pdf_for
+
+        if self._out_of_time():
+            return ""
+        try:
+            from ..platform import frontmost_pid
+            from .windows_pdf import open_pdf_for, pdf_name_from_title
+
+            automation, _module = self._uia()
+            # ONCE. Both the title and the page reading come off this element, and resolving it
+            # twice meant paying the climb twice on every PDF capture -- the common case, since
+            # no Windows viewer puts the page in its title. Doing it once also removes the
+            # chance of the two lookups landing on different windows if focus moves mid-capture.
+            window = self._top_level_window(automation.GetFocusedElement())
+            if window is None:
+                return ""
+            title = str(window.CurrentName or "")
+            pid = frontmost_pid()
+            # The CHEAPEST question next: is this even a PDF window? A regex decides it, while
+            # the page scan below walks the window tree with cross-process calls per node.
+            if not title or not pid or not pdf_name_from_title(title):
+                return ""
+            # Its own remaining budget, so a WMI lookup cannot outlive the route that owns
+            # it -- a fixed constant larger than _PDF_BUDGET_SECONDS would have made the
+            # budget's docstring untrue by 200 ms.
+            path = open_pdf_for(pid, title, self._time_left())
+            if not path or not is_pdf(path):
+                return ""
+            position = parse_page_position(title) or self._page_number_from_ui(window)
+            if position is None:
+                # NO PAGE MEANS NO ROUTE, and this is the common Windows case rather than an
+                # edge: Foxit, Acrobat Reader and Edge all title their windows "<file>.pdf -
+                # <viewer>" with no page in it. Searching the whole document instead would
+                # extract every page with pypdf on the Qt main thread before the "+" appears --
+                # ~6 s for a 300-page thesis, on EVERY capture -- and then hand the uniqueness
+                # gate a haystack so large that almost any real word repeats and it returns
+                # nothing anyway. The user would pay the freeze and get no context.
+                return ""
+            page, total = position
+            count = self._pdf_reader.page_count(path)
+            if count <= 0 or total != count:
+                # The reading did not come from the page box. A find bar shows "3 of 17" in the
+                # same toolbar and the same shape, and Ctrl-F-then-select is an ordinary reading
+                # gesture -- believing it would return a sentence from a page never looked at,
+                # which the uniqueness gate cannot catch because uniqueness on the wrong page is
+                # still uniqueness.
+                return ""
+            texts = self._pdf_reader.page_texts(path, page)
+            if not texts:
+                return ""
+            haystack = texts[0]
+            index = unique_occurrence(haystack, selection)
+            if index < 0:
+                return ""
+            return sentence_around(haystack, index, len(selection))
+        except Exception:
+            return ""
+
+    def _top_level_window(self, element: Any) -> Any:
+        """Climb from ``element`` to the window that owns it, or ``None``.
+
+        Not ``_ancestors_of(...)[-1]``. That chain is capped at ``_MAX_ANCESTOR_HOPS`` because
+        it feeds the text SEARCH, where looking further up starts returning the whole window;
+        the last element of a three-hop chain is the window only when focus happened to be
+        within three levels of it. A tabbed viewer puts the page view four or more levels down
+        (window -> client pane -> tab container -> document pane -> page view), and the title
+        read off that chain is an inner pane's name -- usually empty.
+
+        This climb is a different job with a different stop: it goes up until the parent is the
+        desktop, which is the definition of a top-level window.
+        """
+        try:
+            automation, _module = self._uia()
+            walker = automation.ControlViewWalker
+            root = automation.GetRootElement()
+            node = element
+            for _ in range(_MAX_WINDOW_HOPS):
+                if self._out_of_time():
+                    return None
+                parent = walker.GetParentElement(node)
+                if not parent:
+                    return None
+                if automation.CompareElements(parent, root):
+                    return node
+                node = parent
+        except Exception:
+            return None
+        return None
+
+    def _page_number_from_ui(self, window: Any) -> Optional[tuple[int, int]]:
+        """The ``(page, total)`` the viewer says it is showing, read from its own toolbar.
+
+        macOS gets this from the window title because Preview puts it there. No Windows viewer
+        does -- but they all show it, and UIA exposes it: measured in Foxit, a toolbar element
+        answers ``"1 / 1"``. The TOTAL comes back too, because it is the only way to tell that
+        control apart from a find bar reading ``"3 of 17"``; the caller checks it against the
+        document.
+
+        The node's WHOLE text must be the reading, allowing only a "Page " prefix -- that is a
+        real page-box format. A substring match would accept a date in a comments pane
+        ("9/12/2025") or any sentence that happens to contain "1 of 3".
+
+        Bounded and shallow on purpose: the control is in the toolbar, a few levels below the
+        window, and this runs before the "+" appears.
+        """
+        if window is None:
+            return None
+        try:
+            queue = [(window, 0)]
+            scanned = 0
+            while queue and scanned < _PAGE_SCAN_NODES:
+                node, depth = queue.pop(0)
+                scanned += 1
+                if self._out_of_time():
+                    return None
+                text = (self._text_of(node) or "").strip()
+                if _PAGE_READING_RE.fullmatch(text):
+                    position = parse_page_position(text)
+                    if position is not None:
+                        return position
+                if depth < _PAGE_SCAN_DEPTH:
+                    for child in self._children_of(node):
+                        queue.append((child, depth + 1))
+        except Exception:
+            return None
+        return None
 
     def _sentence_in(self, roots: list, selection: str) -> str:
         """Search ``roots`` for the node containing ``selection`` and trim to its sentence.

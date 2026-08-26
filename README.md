@@ -69,6 +69,8 @@ pip install -r requirements.txt
   Accessibility API for the *context*.
 - **comtypes** (Windows only) — the same job via UI Automation. Pure Python; it builds its COM
   wrappers with `ctypes` at runtime, so it adds no compiled wheel.
+- **pypdf** (non-macOS) — read a PDF's text when the accessibility layer exposes none. macOS
+  uses PDFKit, which ships with the OS.
 
 ## Run
 

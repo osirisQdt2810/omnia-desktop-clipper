@@ -441,7 +441,14 @@ class ClipperApp(QObject):
 
         Resolving the frontmost app is AppKit, so it happens here on the Qt main thread; only the
         pid is handed to the warmer, which does the (possibly slow) AX call on its own thread.
+
+        macOS only, explicitly. ``frontmost_pid`` began answering on Windows too when the PDF
+        lookup needed it, and this caller would otherwise spawn a daemon thread per distinct
+        foreground app that does nothing but fail to import ApplicationServices. Harmless, but
+        threads started to do nothing are how a "harmless" becomes a puzzle later.
         """
+        if sys.platform != "darwin":
+            return
         self._warmer.ensure(platform_helpers.frontmost_pid())
 
     def _on_lookup_clicked(self) -> None:
