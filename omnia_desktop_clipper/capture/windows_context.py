@@ -73,16 +73,19 @@ _CUIAUTOMATION8_CLSID = "{e22ad333-b25f-460c-83d0-0581107395c9}"
 #: what keeps the "+" appearing promptly rather than after the slowest app on the machine.
 _UIA_BUDGET_SECONDS = 1.0
 
-#: How far to look for the viewer's page-number control. It sits in the toolbar, so a few
-#: levels and a few dozen nodes is generous; this runs before the "+" appears.
 #: How far up to look for the owning window. Deep enough for a tabbed viewer's page view,
 #: shallow enough that a pathological tree cannot turn this into a walk.
 _MAX_WINDOW_HOPS = 16
 
+#: How far to look for the viewer's page-number control. It sits in the toolbar, so a few
+#: levels and a few dozen nodes is generous; this runs before the "+" appears.
+
 _PAGE_SCAN_NODES = 120
 _PAGE_SCAN_DEPTH = 5
 
-#: The PDF route's OWN wall clock, started when it begins.
+#: The PDF route's OWN wall clock, started when it begins. Smaller than the UIA budget on
+#: purpose: its measured cost is ~86 ms of WMI plus a bounded 120-node scan, so a whole
+#: second would only widen the worst case a capture can reach.
 #:
 #: It cannot live off what the UIA searches leave behind, because this module documents those
 #: searches as CONSUMING the budget in exactly the case the PDF route exists for: "in a PDF
@@ -90,7 +93,7 @@ _PAGE_SCAN_DEPTH = 5
 #: nothing". Gating the route on the remainder meant it never ran on the gesture it targets --
 #: the feature was dead in its target case and the suite could not see it, because every test
 #: stubbed the searches to return instantly.
-_PDF_BUDGET_SECONDS = 1.0
+_PDF_BUDGET_SECONDS = 0.3
 
 #: A page reading is the WHOLE text of its control, not a substring of it. A date in a
 #: comments pane ("9/12/2025") or a sentence mentioning "1 of 3" is not a page number.
@@ -390,19 +393,27 @@ class WindowsUIAContextProvider(ContextProvider):
         if self._out_of_time():
             return ""
         try:
-            from .windows_pdf import pdf_name_from_title
+            from ..platform import frontmost_pid
+            from .windows_pdf import open_pdf_for, pdf_name_from_title
 
-            title = self._foreground_title()
+            automation, _module = self._uia()
+            # ONCE. Both the title and the page reading come off this element, and resolving it
+            # twice meant paying the climb twice on every PDF capture -- the common case, since
+            # no Windows viewer puts the page in its title. Doing it once also removes the
+            # chance of the two lookups landing on different windows if focus moves mid-capture.
+            window = self._top_level_window(automation.GetFocusedElement())
+            if window is None:
+                return ""
+            title = str(window.CurrentName or "")
             pid = frontmost_pid()
-            # The CHEAPEST question first: is this even a PDF window? Deciding it costs a
-            # regex, while the page scan below is a bounded-but-real walk of the window tree
-            # with cross-process calls per node -- on the Qt main thread, before the "+".
+            # The CHEAPEST question next: is this even a PDF window? A regex decides it, while
+            # the page scan below walks the window tree with cross-process calls per node.
             if not title or not pid or not pdf_name_from_title(title):
                 return ""
             path = open_pdf_for(pid, title)
             if not path or not is_pdf(path):
                 return ""
-            position = parse_page_position(title) or self._page_number_from_ui()
+            position = parse_page_position(title) or self._page_number_from_ui(window)
             if position is None:
                 # NO PAGE MEANS NO ROUTE, and this is the common Windows case rather than an
                 # edge: Foxit, Acrobat Reader and Edge all title their windows "<file>.pdf -
@@ -463,7 +474,7 @@ class WindowsUIAContextProvider(ContextProvider):
             return None
         return None
 
-    def _page_number_from_ui(self) -> Optional[tuple[int, int]]:
+    def _page_number_from_ui(self, window: Any) -> Optional[tuple[int, int]]:
         """The ``(page, total)`` the viewer says it is showing, read from its own toolbar.
 
         macOS gets this from the window title because Preview puts it there. No Windows viewer
@@ -479,14 +490,9 @@ class WindowsUIAContextProvider(ContextProvider):
         Bounded and shallow on purpose: the control is in the toolbar, a few levels below the
         window, and this runs before the "+" appears.
         """
+        if window is None:
+            return None
         try:
-            automation, _module = self._uia()
-            element = automation.GetFocusedElement()
-            if not element:
-                return None
-            window = self._top_level_window(element)
-            if window is None:
-                return None
             queue = [(window, 0)]
             scanned = 0
             while queue and scanned < _PAGE_SCAN_NODES:
@@ -505,25 +511,6 @@ class WindowsUIAContextProvider(ContextProvider):
         except Exception:
             return None
         return None
-
-    def _foreground_title(self) -> str:
-        """The foreground window's title, or ``""``.
-
-        Read through UIA rather than ``GetWindowText`` because the client is already built and
-        the title is a property of the element we would otherwise have to fetch a second way.
-        """
-        try:
-            automation, _module = self._uia()
-            element = automation.GetFocusedElement()
-            if not element:
-                return ""
-            # The WINDOW carries the document title; an inner pane usually carries nothing.
-            window = self._top_level_window(element)
-            if window is None:
-                return ""
-            return str(window.CurrentName or "")
-        except Exception:
-            return ""
 
     def _sentence_in(self, roots: list, selection: str) -> str:
         """Search ``roots`` for the node containing ``selection`` and trim to its sentence.

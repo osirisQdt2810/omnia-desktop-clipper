@@ -706,7 +706,9 @@ class TestThePdfFallback:
         document.write_bytes(bytes.fromhex("255044462d312e340a"))
         provider = WindowsUIAContextProvider()
         provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
-        provider._foreground_title = lambda: title  # type: ignore[method-assign]
+        # The route resolves the window once and reads the title off it, so the stand-in is
+        # the window rather than a title string.
+        provider._top_level_window = lambda _element: _Node(title)  # type: ignore[method-assign]
         provider._pdf_reader = PdfTextReader(_FakeEngine(pages))
         # monkeypatch, not a bare assignment: a rebound module global outlives the test and
         # the next one to touch frontmost_pid then passes or fails by collection order, with
@@ -843,33 +845,33 @@ class TestThePageNumber:
             _FakeAutomation(focused=focused, root=desktop),
             _FakeModule(),
         )
-        provider._text_of = lambda node: getattr(node, "CurrentName", None) or getattr(  # type: ignore[method-assign]
-            node, "text", ""
-        )
-        return provider
+        provider._text_of = lambda node: getattr(  # type: ignore[method-assign]
+            node, "CurrentName", None
+        ) or getattr(node, "text", "")
+        return provider, window
 
     def test_it_reads_the_page_from_the_viewer_toolbar(self) -> None:
-        provider = self._provider_with_toolbar("7 / 90")
+        provider, window = self._provider_with_toolbar("7 / 90")
 
-        assert provider._page_number_from_ui() == (7, 90)
+        assert provider._page_number_from_ui(window) == (7, 90)
 
     def test_the_of_form_works_too(self) -> None:
-        provider = self._provider_with_toolbar("Page 12 of 40")
+        provider, window = self._provider_with_toolbar("Page 12 of 40")
 
-        assert provider._page_number_from_ui() == (12, 40)
+        assert provider._page_number_from_ui(window) == (12, 40)
 
     def test_no_page_control_yields_none(self) -> None:
-        provider = self._provider_with_toolbar(None)
+        provider, window = self._provider_with_toolbar(None)
 
-        assert provider._page_number_from_ui() is None
+        assert provider._page_number_from_ui(window) is None
 
     def test_a_spent_budget_stops_the_scan(self) -> None:
         import time
 
-        provider = self._provider_with_toolbar("7 / 90")
+        provider, window = self._provider_with_toolbar("7 / 90")
         provider._deadline = time.monotonic() - 1
 
-        assert provider._page_number_from_ui() is None
+        assert provider._page_number_from_ui(window) is None
 
 
 class TestNoPageMeansNoRoute:
@@ -890,7 +892,7 @@ class TestNoPageMeansNoRoute:
             ["The mitochondrion is the powerhouse."],
             title="sample.pdf - Viewer",
         )
-        provider._page_number_from_ui = lambda: None  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: None  # type: ignore[method-assign]
 
         assert provider._pdf_context("mitochondrion") == ""
 
@@ -911,7 +913,7 @@ class TestNoPageMeansNoRoute:
             tmp_path, monkeypatch, ["Some text."], title="sample.pdf - Viewer"
         )
         provider._pdf_reader = PdfTextReader(_Recording(["Some text."]))
-        provider._page_number_from_ui = lambda: None  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: None  # type: ignore[method-assign]
 
         provider._pdf_context("text")
 
@@ -927,7 +929,7 @@ class TestNoPageMeansNoRoute:
             ["ignored page one", "The mitochondrion is the powerhouse. Trailing."],
             title="sample.pdf - Foxit PDF Reader",
         )
-        provider._page_number_from_ui = lambda: (2, 2)  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: (2, 2)  # type: ignore[method-assign]
 
         assert provider._pdf_context("mitochondrion") == (
             "The mitochondrion is the powerhouse."
@@ -1043,11 +1045,15 @@ class TestClimbingToTheWindow:
 
         assert provider._ancestors_of(focused)[-1] is not window
 
-    def test_the_title_comes_from_the_window(self) -> None:
+    def test_the_window_carries_the_title(self) -> None:
+        """The route reads CurrentName off whatever this climb returns."""
         desktop, _window, focused = self._tree(4)
         provider = self._provider(desktop, focused)
 
-        assert provider._foreground_title() == "sample.pdf - Foxit PDF Reader"
+        found = provider._top_level_window(focused)
+
+        assert found is not None
+        assert found.CurrentName == "sample.pdf - Foxit PDF Reader"
 
     def test_a_window_with_no_owner_yields_nothing(self) -> None:
         orphan = _Node("orphan")
@@ -1083,7 +1089,7 @@ class TestAFindBarIsNotAPageNumber:
             title="thesis.pdf - Foxit PDF Reader",
         )
         # A find bar on a 3-page document: "2 of 17" cannot be a page reading.
-        provider._page_number_from_ui = lambda: (2, 17)  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: (2, 17)  # type: ignore[method-assign]
 
         assert provider._pdf_context("mitochondrion") == ""
 
@@ -1094,7 +1100,7 @@ class TestAFindBarIsNotAPageNumber:
             ["page one text", "page two mentions mitochondrion once.", "page three"],
             title="thesis.pdf - Foxit PDF Reader",
         )
-        provider._page_number_from_ui = lambda: (2, 3)  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: (2, 3)  # type: ignore[method-assign]
 
         assert provider._pdf_context("mitochondrion") == (
             "page two mentions mitochondrion once."
@@ -1102,15 +1108,17 @@ class TestAFindBarIsNotAPageNumber:
 
     def test_the_whole_text_must_be_the_reading(self) -> None:
         """A date in a comments pane, or a sentence that merely contains "1 of 3"."""
-        provider = TestThePageNumber._provider_with_toolbar("Reviewed 9/12/2025 by QA")
+        provider, window = TestThePageNumber._provider_with_toolbar(
+            "Reviewed 9/12/2025 by QA"
+        )
 
-        assert provider._page_number_from_ui() is None
+        assert provider._page_number_from_ui(window) is None
 
     def test_a_page_prefixed_reading_is_still_a_reading(self) -> None:
         """ "Page 12 of 40" is a real page-box format; only substrings are refused."""
-        provider = TestThePageNumber._provider_with_toolbar("Page 12 of 40")
+        provider, window = TestThePageNumber._provider_with_toolbar("Page 12 of 40")
 
-        assert provider._page_number_from_ui() == (12, 40)
+        assert provider._page_number_from_ui(window) == (12, 40)
 
 
 class TestTheCheapCheckComesFirst:
@@ -1124,7 +1132,7 @@ class TestTheCheapCheckComesFirst:
         )
         scanned = {"n": 0}
 
-        def counting():
+        def counting(_window):
             scanned["n"] += 1
             return None
 
@@ -1134,3 +1142,151 @@ class TestTheCheapCheckComesFirst:
         assert (
             scanned["n"] == 0
         ), "the window tree was walked before a regex could have ruled the window out"
+
+
+class TestTheWmiLookupIsBounded:
+    """Neither CoGetObject nor ExecQuery has a timeout, and this runs on the Qt main thread.
+
+    A deadline checked around a call cannot interrupt one already in flight, so the bound has
+    to be a worker with a hard cutoff. Without it, a contended `winmgmt` -- an inventory agent
+    enumerating Win32_Process, or the service restarting after a repository check -- freezes the
+    tray on every capture while the condition lasts. That is a hang, not the "worse card" this
+    module's failure contract promises.
+    """
+
+    @staticmethod
+    def _clear_cache():
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+
+    def test_a_hung_query_costs_a_miss_not_a_freeze(self, monkeypatch) -> None:
+        import time
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        monkeypatch.setattr(module, "_WMI_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: time.sleep(5) or "never"
+        )
+
+        started = time.monotonic()
+        answer = module.foreground_command_line(4242)
+        elapsed = time.monotonic() - started
+
+        assert answer == ""
+        assert elapsed < 1.0, f"the caller waited {elapsed:.2f}s on a hung WMI"
+
+    def test_the_answer_is_cached_per_process(self, monkeypatch) -> None:
+        """A process's command line never changes, so a viewer is asked once, not per capture."""
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        calls = {"n": 0}
+
+        def counting(_pid):
+            calls["n"] += 1
+            return '"v.exe" "C:\\docs\\a.pdf"'
+
+        monkeypatch.setattr(module, "_query_command_line", counting)
+
+        for _ in range(5):
+            assert module.foreground_command_line(4242) == '"v.exe" "C:\\docs\\a.pdf"'
+        assert calls["n"] == 1
+
+    def test_a_timeout_is_not_cached(self, monkeypatch) -> None:
+        """One bad moment must not become permanent for that process."""
+        import time
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        monkeypatch.setattr(module, "_WMI_TIMEOUT_SECONDS", 0.05)
+        state = {"hang": True}
+
+        def flaky(_pid):
+            if state["hang"]:
+                time.sleep(5)
+            return "recovered"
+
+        monkeypatch.setattr(module, "_query_command_line", flaky)
+
+        assert module.foreground_command_line(7) == ""
+        state["hang"] = False
+        assert module.foreground_command_line(7) == "recovered"
+
+    def test_the_cache_is_bounded(self, monkeypatch) -> None:
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        monkeypatch.setattr(module, "_query_command_line", lambda pid: f"cmd-{pid}")
+
+        for pid in range(200):
+            module.foreground_command_line(pid + 1)
+
+        assert len(module._COMMAND_LINE_CACHE) <= module._COMMAND_LINE_CACHE_SIZE
+
+    def test_no_pid_asks_nothing(self, monkeypatch) -> None:
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        self._clear_cache()
+        asked = {"n": 0}
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: asked.update(n=1) or ""
+        )
+
+        assert module.foreground_command_line(0) == ""
+        assert asked["n"] == 0
+
+
+class TestTheWindowIsResolvedOnce:
+    """Both the title and the page reading come off one element.
+
+    Resolving it twice paid the 16-hop climb twice on every PDF capture -- the common case,
+    since no Windows viewer puts the page in its title -- and left room for the two lookups to
+    land on different windows if focus moved mid-capture.
+    """
+
+    def test_the_climb_happens_once_per_capture(self, tmp_path, monkeypatch) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse."],
+            title="sample.pdf - Foxit PDF Reader",
+        )
+        climbs = {"n": 0}
+
+        def counting(_element):
+            climbs["n"] += 1
+            return _Node("sample.pdf - Foxit PDF Reader")
+
+        provider._top_level_window = counting  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda _window: (1, 1)  # type: ignore[method-assign]
+
+        provider._pdf_context("mitochondrion")
+
+        assert climbs["n"] == 1, f"the window was resolved {climbs['n']} times"
+
+    def test_the_page_scan_is_given_the_same_window(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse."],
+            title="sample.pdf - Foxit PDF Reader",
+        )
+        window = _Node("sample.pdf - Foxit PDF Reader")
+        provider._top_level_window = lambda _element: window  # type: ignore[method-assign]
+        seen = {}
+
+        def scan(given):
+            seen["window"] = given
+            return (1, 1)
+
+        provider._page_number_from_ui = scan  # type: ignore[method-assign]
+
+        provider._pdf_context("mitochondrion")
+
+        assert seen["window"] is window

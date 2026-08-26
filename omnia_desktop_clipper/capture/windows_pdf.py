@@ -20,7 +20,9 @@ never saw.
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections import OrderedDict
 from pathlib import PureWindowsPath
 from typing import Optional
 
@@ -82,19 +84,22 @@ def pdf_name_from_title(title: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def foreground_command_line(pid: int) -> str:
-    """Return the command line of process ``pid``, or ``""``.
+#: A process's command line never changes, so it is asked for once per process rather than once
+#: per capture. Bounded so a long-lived session cannot grow it without limit.
+_COMMAND_LINE_CACHE: OrderedDict[int, str] = OrderedDict()
+_COMMAND_LINE_CACHE_SIZE = 32
 
-    WMI over COM rather than spawning PowerShell: measured at ~20 ms to connect and ~66 ms for a
-    targeted query on this machine, against several hundred for a PowerShell round trip. This
-    runs on the Qt main thread before the "+" appears, and only when UI Automation has already
-    come back empty — which is the PDF case and almost nothing else.
+#: How long one WMI lookup may take before it is abandoned. The measured healthy cost is ~86 ms;
+#: this is the ceiling for the unhealthy case, not a target.
+_WMI_TIMEOUT_SECONDS = 0.5
 
-    Never raises: WMI can be disabled, throttled, or refuse a process owned by another user, and
-    all of those mean "no context", not "no capture".
-    """
-    if not pid:
-        return ""
+
+def _query_command_line(pid: int) -> str:
+    """The WMI call itself. Runs on a worker thread, never on the caller's."""
+    import comtypes
+
+    # A worker thread has no COM apartment of its own until it asks for one.
+    comtypes.CoInitializeEx()
     try:
         import comtypes.client
 
@@ -108,7 +113,65 @@ def foreground_command_line(pid: int) -> str:
                 return str(value)
     except Exception:
         return ""
+    finally:
+        with contextlib.suppress(Exception):
+            comtypes.CoUninitialize()
     return ""
+
+
+def foreground_command_line(pid: int) -> str:
+    """Return the command line of process ``pid``, or ``""``.
+
+    WMI over COM rather than spawning PowerShell: measured at ~20 ms to connect and ~66 ms for a
+    targeted query on this machine, against several hundred for a PowerShell round trip. This
+    runs on the Qt main thread before the "+" appears, and only when UI Automation has already
+    come back empty -- which is the PDF case and almost nothing else.
+
+    TWO BOUNDS, because neither ``CoGetObject`` nor ``ExecQuery`` has a timeout and a deadline
+    checked around a call cannot interrupt one already in flight. On a machine where ``winmgmt``
+    is contended -- an inventory agent enumerating ``Win32_Process``, or the service restarting
+    after a repository check -- that query blocks for seconds with the Qt main thread stopped:
+    no "+", frozen tray, on every capture while the condition lasts. That is a hang, not the
+    "worse card" this module's failure contract promises.
+
+    So the call runs on a worker with a hard timeout, and the answer is cached per pid: a
+    process's command line never changes, so a viewer is asked once rather than once per
+    double-click. A hung WMI then costs one miss instead of a freeze.
+
+    Never raises: WMI can be disabled, throttled, or refuse a process owned by another user, and
+    all of those mean "no context", not "no capture".
+    """
+    if not pid:
+        return ""
+    cached = _COMMAND_LINE_CACHE.get(pid)
+    if cached is not None:
+        _COMMAND_LINE_CACHE.move_to_end(pid)
+        return cached
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutureTimeout
+
+        # NOT a `with` block. ThreadPoolExecutor's __exit__ joins its workers, so a timeout
+        # inside one would be undone by the wait on the way out and the caller would still
+        # sit for the full hang -- which is what this timeout exists to prevent. The pool is
+        # shut down without waiting instead, and an abandoned worker finishes in its own time.
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(_query_command_line, pid)
+            try:
+                answer = future.result(timeout=_WMI_TIMEOUT_SECONDS)
+            except FutureTimeout:
+                # Deliberately NOT cached: the service may be healthy again next time, and a
+                # cached "" would make one bad moment permanent for this process.
+                return ""
+        finally:
+            pool.shutdown(wait=False)
+    except Exception:
+        return ""
+    _COMMAND_LINE_CACHE[pid] = answer
+    while len(_COMMAND_LINE_CACHE) > _COMMAND_LINE_CACHE_SIZE:
+        _COMMAND_LINE_CACHE.popitem(last=False)
+    return answer
 
 
 def open_pdf_for(pid: int, title: str) -> Optional[str]:
