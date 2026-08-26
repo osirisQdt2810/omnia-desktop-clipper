@@ -86,7 +86,7 @@ class TestPdfPathFromCommandLine:
             "C:\\docs\\first.pdf"
         )
 
-    def test_a_name_that_merely_ENDS_the_same_is_refused(self) -> None:
+    def test_a_name_that_merely_ends_the_same_is_refused(self) -> None:
         """The failure a suffix test allows, and the reason this compares basenames.
 
         The viewer was launched with the annual report and the reader then opened report.pdf in
