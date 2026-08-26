@@ -48,6 +48,7 @@ from .context import (
     find_text_containing,
     sentence_around,
 )
+from .pdf_context import PdfTextReader, is_pdf, parse_page_number, unique_occurrence
 
 #: ``CUIAutomation``'s class id. Hard-coded because there is nothing to look it up from: the
 #: automation client is the entry point to everything else here.
@@ -65,6 +66,10 @@ _CUIAUTOMATION8_CLSID = "{e22ad333-b25f-460c-83d0-0581107395c9}"
 #: ``max_nodes`` is per search, not per capture. A deadline is what bounds the pair, and it is
 #: what keeps the "+" appearing promptly rather than after the slowest app on the machine.
 _UIA_BUDGET_SECONDS = 1.0
+
+#: What joins page texts when the page number is unknown. A blank line, so a sentence
+#: cannot be read across a page boundary that was never on screen together.
+PAGE_SEPARATOR = chr(10) + chr(10)
 
 #: UIA's TextUnit_Paragraph. Used with ``RangeFromPoint`` to read the text AT the cursor.
 _TEXT_UNIT_PARAGRAPH = 4
@@ -84,6 +89,9 @@ class WindowsUIAContextProvider(ContextProvider):
         self._module: Any = None
         # Set for the duration of one resolve(); see _UIA_BUDGET_SECONDS.
         self._deadline: Optional[float] = None
+        # Caches the opened PDF between captures; re-opening a 90-page document each time would
+        # be wasteful, and the reader keys on mtime so an edited file is still re-read.
+        self._pdf_reader = PdfTextReader()
 
     # -- COM plumbing -------------------------------------------------------------------------
 
@@ -255,13 +263,14 @@ class WindowsUIAContextProvider(ContextProvider):
                 located = self._context_at_position(selection, position)
                 if located:
                     return located
-            if self._out_of_time():
-                # The point route can spend the whole budget finding nothing -- that is the
-                # PDF case. Starting a second full search then doubles the wait for a result
-                # that is already known to be unlikely.
-                return selection
-            located = self._context_from_focus(selection)
-            return located or selection
+            if not self._out_of_time():
+                located = self._context_from_focus(selection)
+                if located:
+                    return located
+            # UI Automation gave nothing. In a PDF that is not a gap to work around but a hard
+            # wall -- measured, Foxit exposes no text for any node in its window -- so read the
+            # document itself, exactly as the macOS backend does with Preview.
+            return self._pdf_context(selection) or selection
         finally:
             self._deadline = None
 
@@ -333,6 +342,63 @@ class WindowsUIAContextProvider(ContextProvider):
             if not element:
                 return ""
             return self._sentence_in(self._ancestors_of(element), selection)
+        except Exception:
+            return ""
+
+    def _pdf_context(self, selection: str) -> str:
+        """The enclosing sentence read from the open PDF, or ``""``.
+
+        The page is what makes this safe. A word like "inference" occurs 154 times in a real
+        dissertation, and a whole-document search happily returns the title page -- a plausible
+        sentence the reader never saw. Restricted to the page on screen, the same lookup returns
+        what they were looking at. macOS gets that page from the window title and so does this;
+        the difference is only where the FILE comes from (see :mod:`windows_pdf`).
+        """
+        from ..platform import frontmost_pid
+        from .windows_pdf import open_pdf_for
+
+        try:
+            title = self._foreground_title()
+            pid = frontmost_pid()
+            if not title or not pid:
+                return ""
+            path = open_pdf_for(pid, title)
+            if not path or not is_pdf(path):
+                return ""
+            page = parse_page_number(title)
+            texts = self._pdf_reader.page_texts(path, page)
+            if not texts:
+                return ""
+            # With a known page there is exactly one text (that page). Without one, every page
+            # is joined so uniqueness is judged across the WHOLE document -- either way the word
+            # must be unambiguous before its sentence is used.
+            haystack = texts[0] if page is not None else PAGE_SEPARATOR.join(texts)
+            index = unique_occurrence(haystack, selection)
+            if index < 0:
+                return ""
+            return sentence_around(haystack, index, len(selection))
+        except Exception:
+            return ""
+
+    def _foreground_title(self) -> str:
+        """The foreground window's title, or ``""``.
+
+        Read through UIA rather than ``GetWindowText`` because the client is already built and
+        the title is a property of the element we would otherwise have to fetch a second way.
+        """
+        try:
+            automation, _module = self._uia()
+            element = automation.GetFocusedElement()
+            if not element:
+                return ""
+            # Climb to the top-level window: the focused element is usually a control inside it,
+            # and only the window carries the document title.
+            chain = self._ancestors_of(element)
+            for node in reversed(chain):
+                name = str(node.CurrentName or "")
+                if name:
+                    return name
+            return ""
         except Exception:
             return ""
 

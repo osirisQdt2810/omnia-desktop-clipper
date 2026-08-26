@@ -17,7 +17,10 @@ sentence actually on screen, in about 4 ms.
 
 from __future__ import annotations
 
+import abc
+import os
 import re
+import sys
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
@@ -106,35 +109,110 @@ def unique_occurrence(text: str, needle: str) -> int:
     return first
 
 
+class PdfEngine(abc.ABC):
+    """Opens a PDF and reads a page's text. One implementation per platform's available library.
+
+    This seam exists because PDFKit is macOS-only, and the rest of this module -- which page to
+    search, whether the word is unambiguous there, where the sentence ends -- is not. Splitting
+    the engine out is what lets Windows reuse all of that instead of reimplementing it.
+    """
+
+    @abc.abstractmethod
+    def open(self, path: str) -> Any:
+        """Return an opened document handle for ``path``, or ``None`` when it cannot be read."""
+
+    @abc.abstractmethod
+    def page_count(self, document: Any) -> int:
+        """Return the number of pages in ``document`` (0 when it cannot be told)."""
+
+    @abc.abstractmethod
+    def page_text(self, document: Any, index: int) -> str:
+        """Return page ``index``'s text (``""`` when it has none or cannot be read)."""
+
+
+class PdfKitEngine(PdfEngine):
+    """macOS: PDFKit, which ships with the OS and needs no dependency."""
+
+    def open(self, path: str) -> Any:  # pragma: no cover - needs PDFKit (macOS)
+        try:
+            from Foundation import NSURL
+            from Quartz import PDFDocument
+
+            return PDFDocument.alloc().initWithURL_(NSURL.fileURLWithPath_(path))
+        except Exception:
+            return None
+
+    def page_count(self, document: Any) -> int:  # pragma: no cover - needs PDFKit
+        try:
+            return int(document.pageCount())
+        except Exception:
+            return 0
+
+    def page_text(self, document: Any, index: int) -> str:  # pragma: no cover - PDFKit
+        try:
+            page = document.pageAtIndex_(index)
+            return str(page.string() or "") if page is not None else ""
+        except Exception:
+            return ""
+
+
+class PyPdfEngine(PdfEngine):
+    """Everywhere else: pypdf, pure Python and cross-platform.
+
+    Text extraction is not as good as PDFKit's on complex layouts, which is the honest cost of
+    reading a PDF without an OS library. It is enough for the job here: find one word and the
+    sentence around it.
+    """
+
+    def open(self, path: str) -> Any:
+        try:
+            from pypdf import PdfReader
+
+            return PdfReader(path)
+        except Exception:
+            return None
+
+    def page_count(self, document: Any) -> int:
+        try:
+            return len(document.pages)
+        except Exception:
+            return 0
+
+    def page_text(self, document: Any, index: int) -> str:
+        try:
+            return str(document.pages[index].extract_text() or "")
+        except Exception:
+            return ""
+
+
+def build_pdf_engine(platform_name: Optional[str] = None) -> PdfEngine:
+    """Return the PDF engine for this platform."""
+    platform_name = sys.platform if platform_name is None else platform_name
+    return PdfKitEngine() if platform_name == "darwin" else PyPdfEngine()
+
+
 class PdfTextReader:
-    """Opens PDFs with PDFKit and caches them by path + modification time.
+    """Opens PDFs through a :class:`PdfEngine` and caches them by path + modification time.
 
     Re-opening a 90-page document on every capture would be wasteful; keying the cache on the
     file's mtime means an edited document is still re-read.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, engine: Optional[PdfEngine] = None) -> None:
+        self._engine = engine if engine is not None else build_pdf_engine()
         self._path: str = ""
         self._stamp: float = -1.0
         self._document: Any = None
 
     def document(self, path: str) -> Any:
-        """Return the opened ``PDFDocument`` for ``path``, or ``None`` if it cannot be read."""
+        """Return the opened document for ``path``, or ``None`` if it cannot be read."""
         try:
-            import os
-
             stamp = os.path.getmtime(path)
         except OSError:
             return None
         if self._document is not None and self._path == path and self._stamp == stamp:
             return self._document
-        try:  # pragma: no cover - needs PDFKit (macOS)
-            from Foundation import NSURL
-            from Quartz import PDFDocument
-
-            document = PDFDocument.alloc().initWithURL_(NSURL.fileURLWithPath_(path))
-        except Exception:
-            return None
+        document = self._engine.open(path)
         if document is None:
             return None
         self._path, self._stamp, self._document = path, stamp, document
@@ -145,12 +223,10 @@ class PdfTextReader:
         document = self.document(path)
         if document is None:
             return []
-        try:  # pragma: no cover - needs PDFKit (macOS)
-            count = int(document.pageCount())
-            texts = []
-            for index in pages_to_search(page_number, count):
-                page = document.pageAtIndex_(index)
-                texts.append(str(page.string() or "") if page is not None else "")
-            return texts
-        except Exception:
+        count = self._engine.page_count(document)
+        if count <= 0:
             return []
+        return [
+            self._engine.page_text(document, index)
+            for index in pages_to_search(page_number, count)
+        ]

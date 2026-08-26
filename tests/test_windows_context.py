@@ -77,7 +77,9 @@ class TestResolve:
 
         assert provider.resolve("fox") == "The quick brown fox jumps over it."
 
-    def test_it_finds_text_several_levels_below_the_focused_element(self) -> None:
+    def test_it_finds_text_several_levels_below_the_focused_element(
+        self, tmp_path
+    ) -> None:
         """Measured shape: the focused element has no text and the document is four down.
 
         Trusting the focused element is what a naive port would do, and on this tree it returns
@@ -554,7 +556,7 @@ class TestRangeFromPoint:
 
         assert provider._paragraph_at_point("fox", (5, 100)) == ""
 
-    def test_an_element_without_a_text_pattern_falls_through(self) -> None:
+    def test_an_element_without_a_text_pattern_falls_through(self, tmp_path) -> None:
         """Most of Chromium. The caller then searches the subtree instead."""
         provider = WindowsUIAContextProvider()
         automation = _FakeAutomation(at_point=_Node("no text pattern here"))
@@ -654,3 +656,120 @@ class TestItDoesNotSitOnTheQtThread:
 
         assert seen["deadline"] is not None, "no budget was set for the capture"
         assert provider._deadline is None, "the budget outlived the capture"
+
+
+class _FakeEngine:
+    """A PDF whose pages are just strings, so the reader can be driven without a file."""
+
+    def __init__(self, pages) -> None:
+        self.pages = pages
+        self.opened: list = []
+
+    def open(self, path):
+        self.opened.append(path)
+        return object() if self.pages is not None else None
+
+    def page_count(self, _document) -> int:
+        return len(self.pages)
+
+    def page_text(self, _document, index: int) -> str:
+        return self.pages[index]
+
+
+class TestThePdfFallback:
+    """When UIA exposes no text at all -- measured: a real viewer exposes none for any node."""
+
+    @staticmethod
+    def _provider(tmp_path, pages, *, title="sample.pdf - Viewer", pid=4242):
+        """A provider whose PDF reader is driven by a fake engine over a REAL file path.
+
+        The path has to exist: PdfTextReader keys its cache on the file's mtime, so a made-up
+        path returns "cannot read" before the engine is ever consulted -- and the test would
+        then pass for the wrong reason.
+        """
+        import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
+        import omnia_desktop_clipper.platform as platform_module
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        document = tmp_path / "sample.pdf"
+        document.write_bytes(bytes.fromhex("255044462d312e340a"))
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
+        provider._foreground_title = lambda: title  # type: ignore[method-assign]
+        provider._pdf_reader = PdfTextReader(_FakeEngine(pages))
+        windows_pdf.open_pdf_for = lambda _pid, _title: str(document)  # type: ignore[assignment]
+        platform_module.frontmost_pid = lambda: pid  # type: ignore[assignment]
+        return provider
+
+    def test_it_reads_the_sentence_out_of_the_document(self, tmp_path) -> None:
+        provider = self._provider(
+            tmp_path, ["The mitochondrion is the powerhouse of the cell. And more."]
+        )
+
+        assert provider._pdf_context("mitochondrion") == (
+            "The mitochondrion is the powerhouse of the cell."
+        )
+
+    def test_a_word_that_repeats_on_the_page_is_refused(self, tmp_path) -> None:
+        """The safety property, and the reason this reads a PAGE rather than a document.
+
+        "inference" occurs 154 times in a real dissertation; a whole-document search returns
+        the title page -- a plausible sentence the reader never saw. Ambiguous means silence.
+        """
+        provider = self._provider(
+            tmp_path, ["The cell divides. A second cell appears."]
+        )
+
+        assert provider._pdf_context("cell") == ""
+
+    def test_a_word_that_is_not_in_the_document_yields_nothing(self, tmp_path) -> None:
+        provider = self._provider(tmp_path, ["Nothing relevant here at all."])
+
+        assert provider._pdf_context("mitochondrion") == ""
+
+    def test_no_pdf_on_screen_yields_nothing(self, tmp_path) -> None:
+        import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
+
+        provider = self._provider(tmp_path, ["Some text."])
+        windows_pdf.open_pdf_for = lambda _pid, _title: None  # type: ignore[assignment]
+
+        assert provider._pdf_context("Some") == ""
+
+    def test_a_non_pdf_path_is_refused(self, tmp_path) -> None:
+        """`is_pdf` guards against a viewer whose command line named something else.
+
+        The decoy EXISTS on disk on purpose. A made-up path is rejected by the mtime lookup
+        before is_pdf is ever consulted, so the test would pass with the guard deleted -- which
+        is exactly what mutation testing showed.
+        """
+        import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
+
+        decoy = tmp_path / "notes.txt"
+        decoy.write_text("Some text here.", encoding="utf-8")
+        provider = self._provider(tmp_path, ["Some text here."])
+        windows_pdf.open_pdf_for = lambda _pid, _title: str(decoy)  # type: ignore[assignment]
+
+        assert provider._pdf_context("text") == ""
+
+    def test_resolve_falls_through_to_it_when_uia_finds_nothing(self, tmp_path) -> None:
+        """The wiring: a PDF viewer's tree yields nothing, so resolve must reach the document."""
+        provider = self._provider(
+            tmp_path, ["The document sentence about policy. Trailing."]
+        )
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
+
+        assert provider.resolve("policy", position=(1, 2)) == (
+            "The document sentence about policy."
+        )
+
+    def test_the_selection_survives_when_the_document_cannot_be_read(
+        self, tmp_path
+    ) -> None:
+        provider = self._provider(tmp_path, None)
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
+
+        assert provider.resolve("policy", position=(1, 2)) == "policy"
