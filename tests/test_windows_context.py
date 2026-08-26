@@ -680,12 +680,16 @@ class TestThePdfFallback:
     """When UIA exposes no text at all -- measured: a real viewer exposes none for any node."""
 
     @staticmethod
-    def _provider(tmp_path, pages, *, title="sample.pdf - Viewer", pid=4242):
+    def _provider(tmp_path, pages, *, title="sample.pdf - Page 1 of 1", pid=4242):
         """A provider whose PDF reader is driven by a fake engine over a REAL file path.
 
         The path has to exist: PdfTextReader keys its cache on the file's mtime, so a made-up
         path returns "cannot read" before the engine is ever consulted -- and the test would
         then pass for the wrong reason.
+
+        The default title carries a PAGE. It did not until the whole-document fallback was
+        removed, and that is why these tests passed while the route they exercised would have
+        extracted every page of a 300-page document on the Qt main thread.
         """
         import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
         import omnia_desktop_clipper.platform as platform_module
@@ -773,3 +777,157 @@ class TestThePdfFallback:
         provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
 
         assert provider.resolve("policy", position=(1, 2)) == "policy"
+
+
+class _PageElement:
+    """A toolbar control that reports the current page the way a viewer's does."""
+
+    def __init__(self, value: str) -> None:
+        self.CurrentName = value
+        self.children: list = []
+        self.parent = None
+
+    def GetCurrentPattern(self, _id):  # noqa: N802 - UIA's own spelling
+        return None
+
+
+class TestThePageNumber:
+    """Where the page comes from, and what happens when there is none.
+
+    macOS reads it from the window title because Preview puts it there. No Windows viewer does
+    -- Foxit, Acrobat Reader and Edge all title their windows "<file>.pdf - <viewer>" -- but
+    they all SHOW it, and UIA exposes it: measured in Foxit, a toolbar element answers "1 / 1".
+    """
+
+    @staticmethod
+    def _provider_with_toolbar(page_text):
+        toolbar = _PageElement(page_text) if page_text is not None else _Node("")
+        window = _Node("sample.pdf - Foxit PDF Reader", [toolbar])
+        focused = _Node("", [])
+        focused.parent = window
+        window.children.append(focused)
+        desktop = _Node("Desktop 1", [window])
+        window.parent = desktop
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (  # type: ignore[method-assign]
+            _FakeAutomation(focused=focused, root=desktop),
+            _FakeModule(),
+        )
+        provider._text_of = lambda node: getattr(node, "CurrentName", None) or getattr(  # type: ignore[method-assign]
+            node, "text", ""
+        )
+        return provider
+
+    def test_it_reads_the_page_from_the_viewer_toolbar(self) -> None:
+        provider = self._provider_with_toolbar("7 / 90")
+
+        assert provider._page_number_from_ui() == 7
+
+    def test_the_of_form_works_too(self) -> None:
+        provider = self._provider_with_toolbar("Page 12 of 40")
+
+        assert provider._page_number_from_ui() == 12
+
+    def test_no_page_control_yields_none(self) -> None:
+        provider = self._provider_with_toolbar(None)
+
+        assert provider._page_number_from_ui() is None
+
+    def test_a_spent_budget_stops_the_scan(self) -> None:
+        import time
+
+        provider = self._provider_with_toolbar("7 / 90")
+        provider._deadline = time.monotonic() - 1
+
+        assert provider._page_number_from_ui() is None
+
+
+class TestNoPageMeansNoRoute:
+    """The whole-document fallback is gone, and this is why.
+
+    Extracting every page with pypdf runs on the Qt main thread before the "+" appears -- about
+    six seconds for a 300-page thesis, on EVERY capture -- and then hands the uniqueness gate a
+    haystack so large that almost any real word repeats, so it returns nothing anyway. The user
+    would pay the freeze and get no context.
+    """
+
+    def test_a_document_with_no_known_page_is_refused(self, tmp_path) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            ["The mitochondrion is the powerhouse."],
+            title="sample.pdf - Viewer",
+        )
+        provider._page_number_from_ui = lambda: None  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == ""
+
+    def test_the_document_is_never_opened_when_the_page_is_unknown(
+        self, tmp_path
+    ) -> None:
+        """Not merely a different answer -- the expensive work must not start."""
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        opened: list = []
+
+        class _Recording(_FakeEngine):
+            def open(self, path):
+                opened.append(path)
+                return super().open(path)
+
+        provider = TestThePdfFallback._provider(
+            tmp_path, ["Some text."], title="sample.pdf - Viewer"
+        )
+        provider._pdf_reader = PdfTextReader(_Recording(["Some text."]))
+        provider._page_number_from_ui = lambda: None  # type: ignore[method-assign]
+
+        provider._pdf_context("text")
+
+        assert opened == [], "the PDF was read despite the page being unknown"
+
+    def test_the_ui_page_rescues_a_title_without_one(self, tmp_path) -> None:
+        """The common Windows case: the title has no page, the toolbar does."""
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            ["ignored page one", "The mitochondrion is the powerhouse. Trailing."],
+            title="sample.pdf - Foxit PDF Reader",
+        )
+        provider._page_number_from_ui = lambda: 2  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == (
+            "The mitochondrion is the powerhouse."
+        )
+
+
+class TestTheBudgetCoversThePdfRoute:
+    def test_an_expired_budget_skips_the_pdf_route_entirely(self, tmp_path) -> None:
+        """It reads files and queries WMI; starting it with the budget gone is how a capture
+        ends up costing seconds."""
+        import time
+
+        provider = TestThePdfFallback._provider(tmp_path, ["The word is here."])
+        provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
+        provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
+
+        def spend(_selection):
+            provider._deadline = time.monotonic() - 1
+            return ""
+
+        provider._context_from_focus = spend  # type: ignore[method-assign]
+        reached = {"pdf": False}
+
+        def pdf(_selection):
+            reached["pdf"] = True
+            return "should not be reached"
+
+        provider._pdf_context = pdf  # type: ignore[method-assign]
+
+        assert provider.resolve("word", position=(1, 2)) == "word"
+        assert not reached["pdf"]
+
+    def test_pdf_context_checks_the_budget_itself(self, tmp_path) -> None:
+        import time
+
+        provider = TestThePdfFallback._provider(tmp_path, ["The word is here."])
+        provider._deadline = time.monotonic() - 1
+
+        assert provider._pdf_context("word") == ""

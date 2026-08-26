@@ -67,6 +67,11 @@ _CUIAUTOMATION8_CLSID = "{e22ad333-b25f-460c-83d0-0581107395c9}"
 #: what keeps the "+" appearing promptly rather than after the slowest app on the machine.
 _UIA_BUDGET_SECONDS = 1.0
 
+#: How far to look for the viewer's page-number control. It sits in the toolbar, so a few
+#: levels and a few dozen nodes is generous; this runs before the "+" appears.
+_PAGE_SCAN_NODES = 120
+_PAGE_SCAN_DEPTH = 5
+
 #: What joins page texts when the page number is unknown. A blank line, so a sentence
 #: cannot be read across a page boundary that was never on screen together.
 PAGE_SEPARATOR = chr(10) + chr(10)
@@ -267,6 +272,11 @@ class WindowsUIAContextProvider(ContextProvider):
                 located = self._context_from_focus(selection)
                 if located:
                     return located
+            if self._out_of_time():
+                # The PDF route reads files and queries WMI. Starting it with the budget
+                # already gone is how a capture ends up costing seconds -- the deadline has to
+                # gate the whole capture, not just the UIA half.
+                return selection
             # UI Automation gave nothing. In a PDF that is not a gap to work around but a hard
             # wall -- measured, Foxit exposes no text for any node in its window -- so read the
             # document itself, exactly as the macOS backend does with Preview.
@@ -357,15 +367,28 @@ class WindowsUIAContextProvider(ContextProvider):
         from ..platform import frontmost_pid
         from .windows_pdf import open_pdf_for
 
+        if self._out_of_time():
+            return ""
         try:
             title = self._foreground_title()
             pid = frontmost_pid()
             if not title or not pid:
                 return ""
+            page = parse_page_number(title)
+            if page is None:
+                page = self._page_number_from_ui()
+            if page is None:
+                # NO PAGE MEANS NO ROUTE, and this is the common Windows case rather than an
+                # edge: Foxit, Acrobat Reader and Edge all title their windows "<file>.pdf -
+                # <viewer>" with no page in it. Searching the whole document instead would
+                # extract every page with pypdf on the Qt main thread before the "+" appears --
+                # ~6 s for a 300-page thesis, on EVERY capture -- and then hand the uniqueness
+                # gate a haystack so large that almost any real word repeats and it returns
+                # nothing anyway. The user would pay the freeze and get no context.
+                return ""
             path = open_pdf_for(pid, title)
             if not path or not is_pdf(path):
                 return ""
-            page = parse_page_number(title)
             texts = self._pdf_reader.page_texts(path, page)
             if not texts:
                 return ""
@@ -379,6 +402,43 @@ class WindowsUIAContextProvider(ContextProvider):
             return sentence_around(haystack, index, len(selection))
         except Exception:
             return ""
+
+    def _page_number_from_ui(self) -> Optional[int]:
+        """The page the viewer says it is showing, read from its own toolbar.
+
+        macOS gets this from the window title because Preview puts it there. No Windows viewer
+        does -- but they all show it, and UIA exposes it: measured in Foxit, a toolbar element
+        answers ``"1 / 1"``, which is a format ``parse_page_number`` already understands. So the
+        page comes from the same place the reader sees it.
+
+        Bounded and shallow on purpose: the control is in the toolbar, a few levels below the
+        window, and this runs before the "+" appears.
+        """
+        try:
+            automation, _module = self._uia()
+            element = automation.GetFocusedElement()
+            if not element:
+                return None
+            roots = self._ancestors_of(element)
+            window = roots[-1] if roots else None
+            if window is None:
+                return None
+            queue = [(window, 0)]
+            scanned = 0
+            while queue and scanned < _PAGE_SCAN_NODES:
+                node, depth = queue.pop(0)
+                scanned += 1
+                if self._out_of_time():
+                    return None
+                page = parse_page_number(self._text_of(node))
+                if page is not None:
+                    return page
+                if depth < _PAGE_SCAN_DEPTH:
+                    for child in self._children_of(node):
+                        queue.append((child, depth + 1))
+        except Exception:
+            return None
+        return None
 
     def _foreground_title(self) -> str:
         """The foreground window's title, or ``""``.

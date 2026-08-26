@@ -21,6 +21,7 @@ never saw.
 from __future__ import annotations
 
 import re
+from pathlib import PureWindowsPath
 from typing import Optional
 
 #: Matches a ``.pdf`` argument in a command line, quoted or not. Quoted first: a path with
@@ -58,7 +59,13 @@ def pdf_path_from_command_line(command_line: str, *, expected_name: str = "") ->
         # The executable itself can end in .pdf only in a contrived case, but the first match
         # being the program is the shape to guard against; requiring a name match when we have
         # one does that for free.
-        if wanted and not candidate.lower().endswith(wanted):
+        if wanted and PureWindowsPath(candidate).name.lower() != wanted:
+            # BASENAME, not endswith. A suffix test accepts a different document whose name
+            # merely ends the same way: "2026-annual-report.pdf".endswith("report.pdf") is
+            # True, so opening report.pdf in a new tab would have been answered with the
+            # annual report -- a sentence from a file the reader never had on screen, which is
+            # precisely what this check exists to refuse. Prefix-decorated names
+            # (draft-notes.pdf, v2-thesis.pdf) make that an ordinary case, not a contrived one.
             continue
         return candidate
     return ""

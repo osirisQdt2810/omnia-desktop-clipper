@@ -86,6 +86,22 @@ class TestPdfPathFromCommandLine:
             "C:\\docs\\first.pdf"
         )
 
+    def test_a_name_that_merely_ENDS_the_same_is_refused(self) -> None:
+        """The failure a suffix test allows, and the reason this compares basenames.
+
+        The viewer was launched with the annual report and the reader then opened report.pdf in
+        a new tab. "2026-annual-report.pdf".endswith("report.pdf") is True, so a suffix test
+        answers with the annual report -- a document that was never on screen.
+        """
+        line = '"v.exe" "C:\\Users\\me\\Downloads\\2026-annual-report.pdf"'
+
+        assert pdf_path_from_command_line(line, expected_name="report.pdf") == ""
+
+    def test_a_directory_that_ends_the_same_is_refused_too(self) -> None:
+        line = '"v.exe" "C:\\report.pdf\\other.pdf"'
+
+        assert pdf_path_from_command_line(line, expected_name="report.pdf") == ""
+
     def test_matching_the_name_ignores_case(self) -> None:
         line = '"v.exe" "C:\\docs\\Report.PDF"'
         assert pdf_path_from_command_line(line, expected_name="report.pdf") == (
