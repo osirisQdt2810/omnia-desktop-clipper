@@ -33,17 +33,34 @@ _PAGE_IN_TITLE_RE = re.compile(r"(\d+)\s*(?:of|/)\s*(\d+)")
 # reader was not looking at. That is precisely the guess this module refuses to make.
 
 
+def parse_page_position(text: str) -> Optional[tuple[int, int]]:
+    """Return ``(page, total)`` from a "57 of 90" / "57 / 90" reading, or ``None``.
+
+    The TOTAL is what makes the reading checkable. On Windows the page is taken from a control
+    in the viewer's own toolbar, and a find bar reading ``"3 of 17"`` has exactly the same shape
+    as a page box reading ``"40 / 90"``. Comparing the total against the document's real page
+    count tells them apart; the page alone cannot.
+
+    Args:
+        text: A window title or a control's text.
+    """
+    match = _PAGE_IN_TITLE_RE.search(text or "")
+    if not match:
+        return None
+    page, total = int(match.group(1)), int(match.group(2))
+    if page <= 0 or total <= 0 or page > total:
+        return None
+    return page, total
+
+
 def parse_page_number(title: str) -> Optional[int]:
     """Return the 1-based page number from a PDF window title, or ``None``.
 
     Args:
         title: The window title, e.g. ``"report.pdf - Page 57 of 90"``.
     """
-    match = _PAGE_IN_TITLE_RE.search(title or "")
-    if not match:
-        return None
-    page = int(match.group(1))
-    return page if page > 0 else None
+    position = parse_page_position(title)
+    return position[0] if position else None
 
 
 def path_from_document_url(document_url: str) -> str:
@@ -217,6 +234,15 @@ class PdfTextReader:
             return None
         self._path, self._stamp, self._document = path, stamp, document
         return document
+
+    def page_count(self, path: str) -> int:
+        """How many pages ``path`` has, or 0.
+
+        Public because a page reading taken from a viewer's toolbar has to be CHECKED against
+        it -- a find bar and a page box are indistinguishable by shape alone.
+        """
+        document = self.document(path)
+        return self._engine.page_count(document) if document is not None else 0
 
     def page_texts(self, path: str, page_number: Optional[int]) -> list[str]:
         """Return the text of the pages worth searching, nearest the reader first."""

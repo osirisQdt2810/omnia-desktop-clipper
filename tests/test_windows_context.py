@@ -680,7 +680,9 @@ class TestThePdfFallback:
     """When UIA exposes no text at all -- measured: a real viewer exposes none for any node."""
 
     @staticmethod
-    def _provider(tmp_path, pages, *, title="sample.pdf - Page 1 of 1", pid=4242):
+    def _provider(
+        tmp_path, monkeypatch, pages, *, title="sample.pdf - Page 1 of 1", pid=4242
+    ):
         """A provider whose PDF reader is driven by a fake engine over a REAL file path.
 
         The path has to exist: PdfTextReader keys its cache on the file's mtime, so a made-up
@@ -701,46 +703,65 @@ class TestThePdfFallback:
         provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
         provider._foreground_title = lambda: title  # type: ignore[method-assign]
         provider._pdf_reader = PdfTextReader(_FakeEngine(pages))
-        windows_pdf.open_pdf_for = lambda _pid, _title: str(document)  # type: ignore[assignment]
-        platform_module.frontmost_pid = lambda: pid  # type: ignore[assignment]
+        # monkeypatch, not a bare assignment: a rebound module global outlives the test and
+        # the next one to touch frontmost_pid then passes or fails by collection order, with
+        # the cause nowhere near the failure.
+        monkeypatch.setattr(
+            windows_pdf, "open_pdf_for", lambda _pid, _title: str(document)
+        )
+        monkeypatch.setattr(platform_module, "frontmost_pid", lambda: pid)
         return provider
 
-    def test_it_reads_the_sentence_out_of_the_document(self, tmp_path) -> None:
+    def test_it_reads_the_sentence_out_of_the_document(
+        self, tmp_path, monkeypatch
+    ) -> None:
         provider = self._provider(
-            tmp_path, ["The mitochondrion is the powerhouse of the cell. And more."]
+            tmp_path,
+            monkeypatch,
+            ["The mitochondrion is the powerhouse of the cell. And more."],
         )
 
         assert provider._pdf_context("mitochondrion") == (
             "The mitochondrion is the powerhouse of the cell."
         )
 
-    def test_a_word_that_repeats_on_the_page_is_refused(self, tmp_path) -> None:
+    def test_a_word_that_repeats_on_the_page_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """The safety property, and the reason this reads a PAGE rather than a document.
 
         "inference" occurs 154 times in a real dissertation; a whole-document search returns
         the title page -- a plausible sentence the reader never saw. Ambiguous means silence.
         """
         provider = self._provider(
-            tmp_path, ["The cell divides. A second cell appears."]
+            tmp_path, monkeypatch, ["The cell divides. A second cell appears."]
         )
 
         assert provider._pdf_context("cell") == ""
 
-    def test_a_word_that_is_not_in_the_document_yields_nothing(self, tmp_path) -> None:
-        provider = self._provider(tmp_path, ["Nothing relevant here at all."])
+    def test_a_word_that_is_not_in_the_document_yields_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = self._provider(
+            tmp_path, monkeypatch, ["Nothing relevant here at all."]
+        )
 
         assert provider._pdf_context("mitochondrion") == ""
 
-    def test_no_pdf_on_screen_yields_nothing(self, tmp_path) -> None:
+    def test_no_pdf_on_screen_yields_nothing(self, tmp_path, monkeypatch) -> None:
         import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
 
-        provider = self._provider(tmp_path, ["Some text."])
-        windows_pdf.open_pdf_for = lambda _pid, _title: None  # type: ignore[assignment]
+        provider = self._provider(tmp_path, monkeypatch, ["Some text."])
+        monkeypatch.setattr(windows_pdf, "open_pdf_for", lambda _pid, _title: None)
 
         assert provider._pdf_context("Some") == ""
 
-    def test_a_non_pdf_path_is_refused(self, tmp_path) -> None:
-        """`is_pdf` guards against a viewer whose command line named something else.
+    def test_a_non_pdf_path_is_refused(self, tmp_path, monkeypatch) -> None:
+        """`is_pdf` is defence in depth, and this pins it as such.
+
+        Production cannot currently reach it: pdf_path_from_command_line only ever returns
+        strings its own .pdf regex matched. The guard is kept for the next caller, and the
+        test says so rather than implying it catches something live.
 
         The decoy EXISTS on disk on purpose. A made-up path is rejected by the mtime lookup
         before is_pdf is ever consulted, so the test would pass with the guard deleted -- which
@@ -750,15 +771,19 @@ class TestThePdfFallback:
 
         decoy = tmp_path / "notes.txt"
         decoy.write_text("Some text here.", encoding="utf-8")
-        provider = self._provider(tmp_path, ["Some text here."])
-        windows_pdf.open_pdf_for = lambda _pid, _title: str(decoy)  # type: ignore[assignment]
+        provider = self._provider(tmp_path, monkeypatch, ["Some text here."])
+        monkeypatch.setattr(
+            windows_pdf, "open_pdf_for", lambda _pid, _title: str(decoy)
+        )
 
         assert provider._pdf_context("text") == ""
 
-    def test_resolve_falls_through_to_it_when_uia_finds_nothing(self, tmp_path) -> None:
+    def test_resolve_falls_through_to_it_when_uia_finds_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """The wiring: a PDF viewer's tree yields nothing, so resolve must reach the document."""
         provider = self._provider(
-            tmp_path, ["The document sentence about policy. Trailing."]
+            tmp_path, monkeypatch, ["The document sentence about policy. Trailing."]
         )
         provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
         provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
@@ -769,9 +794,9 @@ class TestThePdfFallback:
         )
 
     def test_the_selection_survives_when_the_document_cannot_be_read(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
-        provider = self._provider(tmp_path, None)
+        provider = self._provider(tmp_path, monkeypatch, None)
         provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
         provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
         provider._context_from_focus = lambda _s: ""  # type: ignore[method-assign]
@@ -821,12 +846,12 @@ class TestThePageNumber:
     def test_it_reads_the_page_from_the_viewer_toolbar(self) -> None:
         provider = self._provider_with_toolbar("7 / 90")
 
-        assert provider._page_number_from_ui() == 7
+        assert provider._page_number_from_ui() == (7, 90)
 
     def test_the_of_form_works_too(self) -> None:
         provider = self._provider_with_toolbar("Page 12 of 40")
 
-        assert provider._page_number_from_ui() == 12
+        assert provider._page_number_from_ui() == (12, 40)
 
     def test_no_page_control_yields_none(self) -> None:
         provider = self._provider_with_toolbar(None)
@@ -851,9 +876,12 @@ class TestNoPageMeansNoRoute:
     would pay the freeze and get no context.
     """
 
-    def test_a_document_with_no_known_page_is_refused(self, tmp_path) -> None:
+    def test_a_document_with_no_known_page_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
         provider = TestThePdfFallback._provider(
             tmp_path,
+            monkeypatch,
             ["The mitochondrion is the powerhouse."],
             title="sample.pdf - Viewer",
         )
@@ -862,7 +890,7 @@ class TestNoPageMeansNoRoute:
         assert provider._pdf_context("mitochondrion") == ""
 
     def test_the_document_is_never_opened_when_the_page_is_unknown(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
         """Not merely a different answer -- the expensive work must not start."""
         from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
@@ -875,7 +903,7 @@ class TestNoPageMeansNoRoute:
                 return super().open(path)
 
         provider = TestThePdfFallback._provider(
-            tmp_path, ["Some text."], title="sample.pdf - Viewer"
+            tmp_path, monkeypatch, ["Some text."], title="sample.pdf - Viewer"
         )
         provider._pdf_reader = PdfTextReader(_Recording(["Some text."]))
         provider._page_number_from_ui = lambda: None  # type: ignore[method-assign]
@@ -884,14 +912,17 @@ class TestNoPageMeansNoRoute:
 
         assert opened == [], "the PDF was read despite the page being unknown"
 
-    def test_the_ui_page_rescues_a_title_without_one(self, tmp_path) -> None:
+    def test_the_ui_page_rescues_a_title_without_one(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """The common Windows case: the title has no page, the toolbar does."""
         provider = TestThePdfFallback._provider(
             tmp_path,
+            monkeypatch,
             ["ignored page one", "The mitochondrion is the powerhouse. Trailing."],
             title="sample.pdf - Foxit PDF Reader",
         )
-        provider._page_number_from_ui = lambda: 2  # type: ignore[method-assign]
+        provider._page_number_from_ui = lambda: (2, 2)  # type: ignore[method-assign]
 
         assert provider._pdf_context("mitochondrion") == (
             "The mitochondrion is the powerhouse."
@@ -899,12 +930,16 @@ class TestNoPageMeansNoRoute:
 
 
 class TestTheBudgetCoversThePdfRoute:
-    def test_an_expired_budget_skips_the_pdf_route_entirely(self, tmp_path) -> None:
+    def test_an_expired_budget_skips_the_pdf_route_entirely(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """It reads files and queries WMI; starting it with the budget gone is how a capture
         ends up costing seconds."""
         import time
 
-        provider = TestThePdfFallback._provider(tmp_path, ["The word is here."])
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["The word is here."]
+        )
         provider._paragraph_at_point = lambda _s, _p: ""  # type: ignore[method-assign]
         provider._context_at_position = lambda _s, _p: ""  # type: ignore[method-assign]
 
@@ -924,10 +959,85 @@ class TestTheBudgetCoversThePdfRoute:
         assert provider.resolve("word", position=(1, 2)) == "word"
         assert not reached["pdf"]
 
-    def test_pdf_context_checks_the_budget_itself(self, tmp_path) -> None:
+    def test_pdf_context_checks_the_budget_itself(self, tmp_path, monkeypatch) -> None:
         import time
 
-        provider = TestThePdfFallback._provider(tmp_path, ["The word is here."])
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["The word is here."]
+        )
         provider._deadline = time.monotonic() - 1
 
         assert provider._pdf_context("word") == ""
+
+
+class TestAFindBarIsNotAPageNumber:
+    """The reading has to be CHECKED, because a find bar has the same shape as a page box.
+
+    Ctrl-F then double-click is an ordinary reading gesture, not an edge case. Foxit and
+    Acrobat both put the find counter ("3 of 17") in the same toolbar as the page box
+    ("40 / 90"), and nothing about the text tells them apart. Believing the wrong one returns a
+    sentence from a page the reader never looked at -- and the uniqueness gate cannot catch it,
+    because uniqueness on the wrong page is still uniqueness.
+    """
+
+    def test_a_total_that_disagrees_with_the_document_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["page one text", "page two mentions mitochondrion once.", "page three"],
+            title="thesis.pdf - Foxit PDF Reader",
+        )
+        # A find bar on a 3-page document: "2 of 17" cannot be a page reading.
+        provider._page_number_from_ui = lambda: (2, 17)  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == ""
+
+    def test_a_total_that_matches_is_believed(self, tmp_path, monkeypatch) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path,
+            monkeypatch,
+            ["page one text", "page two mentions mitochondrion once.", "page three"],
+            title="thesis.pdf - Foxit PDF Reader",
+        )
+        provider._page_number_from_ui = lambda: (2, 3)  # type: ignore[method-assign]
+
+        assert provider._pdf_context("mitochondrion") == (
+            "page two mentions mitochondrion once."
+        )
+
+    def test_the_whole_text_must_be_the_reading(self) -> None:
+        """A date in a comments pane, or a sentence that merely contains "1 of 3"."""
+        provider = TestThePageNumber._provider_with_toolbar("Reviewed 9/12/2025 by QA")
+
+        assert provider._page_number_from_ui() is None
+
+    def test_a_page_prefixed_reading_is_still_a_reading(self) -> None:
+        """ "Page 12 of 40" is a real page-box format; only substrings are refused."""
+        provider = TestThePageNumber._provider_with_toolbar("Page 12 of 40")
+
+        assert provider._page_number_from_ui() == (12, 40)
+
+
+class TestTheCheapCheckComesFirst:
+    """Deciding "is this even a PDF window?" costs a regex; the page scan costs COM calls."""
+
+    def test_a_window_with_no_pdf_in_its_title_never_scans_for_a_page(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        provider = TestThePdfFallback._provider(
+            tmp_path, monkeypatch, ["Some text."], title="Untitled - Paint"
+        )
+        scanned = {"n": 0}
+
+        def counting():
+            scanned["n"] += 1
+            return None
+
+        provider._page_number_from_ui = counting  # type: ignore[method-assign]
+
+        assert provider._pdf_context("text") == ""
+        assert (
+            scanned["n"] == 0
+        ), "the window tree was walked before a regex could have ruled the window out"

@@ -37,6 +37,7 @@ not a crash.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
@@ -48,7 +49,12 @@ from .context import (
     find_text_containing,
     sentence_around,
 )
-from .pdf_context import PdfTextReader, is_pdf, parse_page_number, unique_occurrence
+from .pdf_context import (
+    PdfTextReader,
+    is_pdf,
+    parse_page_position,
+    unique_occurrence,
+)
 
 #: ``CUIAutomation``'s class id. Hard-coded because there is nothing to look it up from: the
 #: automation client is the entry point to everything else here.
@@ -72,9 +78,9 @@ _UIA_BUDGET_SECONDS = 1.0
 _PAGE_SCAN_NODES = 120
 _PAGE_SCAN_DEPTH = 5
 
-#: What joins page texts when the page number is unknown. A blank line, so a sentence
-#: cannot be read across a page boundary that was never on screen together.
-PAGE_SEPARATOR = chr(10) + chr(10)
+#: A page reading is the WHOLE text of its control, not a substring of it. A date in a
+#: comments pane ("9/12/2025") or a sentence mentioning "1 of 3" is not a page number.
+_PAGE_READING_RE = re.compile(r"(?:page\s*)?\d+\s*(?:of|/)\s*\d+", re.IGNORECASE)
 
 #: UIA's TextUnit_Paragraph. Used with ``RangeFromPoint`` to read the text AT the cursor.
 _TEXT_UNIT_PARAGRAPH = 4
@@ -370,14 +376,20 @@ class WindowsUIAContextProvider(ContextProvider):
         if self._out_of_time():
             return ""
         try:
+            from .windows_pdf import pdf_name_from_title
+
             title = self._foreground_title()
             pid = frontmost_pid()
-            if not title or not pid:
+            # The CHEAPEST question first: is this even a PDF window? Deciding it costs a
+            # regex, while the page scan below is a bounded-but-real walk of the window tree
+            # with cross-process calls per node -- on the Qt main thread, before the "+".
+            if not title or not pid or not pdf_name_from_title(title):
                 return ""
-            page = parse_page_number(title)
-            if page is None:
-                page = self._page_number_from_ui()
-            if page is None:
+            path = open_pdf_for(pid, title)
+            if not path or not is_pdf(path):
+                return ""
+            position = parse_page_position(title) or self._page_number_from_ui()
+            if position is None:
                 # NO PAGE MEANS NO ROUTE, and this is the common Windows case rather than an
                 # edge: Foxit, Acrobat Reader and Edge all title their windows "<file>.pdf -
                 # <viewer>" with no page in it. Searching the whole document instead would
@@ -386,16 +398,19 @@ class WindowsUIAContextProvider(ContextProvider):
                 # gate a haystack so large that almost any real word repeats and it returns
                 # nothing anyway. The user would pay the freeze and get no context.
                 return ""
-            path = open_pdf_for(pid, title)
-            if not path or not is_pdf(path):
+            page, total = position
+            count = self._pdf_reader.page_count(path)
+            if count <= 0 or total != count:
+                # The reading did not come from the page box. A find bar shows "3 of 17" in the
+                # same toolbar and the same shape, and Ctrl-F-then-select is an ordinary reading
+                # gesture -- believing it would return a sentence from a page never looked at,
+                # which the uniqueness gate cannot catch because uniqueness on the wrong page is
+                # still uniqueness.
                 return ""
             texts = self._pdf_reader.page_texts(path, page)
             if not texts:
                 return ""
-            # With a known page there is exactly one text (that page). Without one, every page
-            # is joined so uniqueness is judged across the WHOLE document -- either way the word
-            # must be unambiguous before its sentence is used.
-            haystack = texts[0] if page is not None else PAGE_SEPARATOR.join(texts)
+            haystack = texts[0]
             index = unique_occurrence(haystack, selection)
             if index < 0:
                 return ""
@@ -403,13 +418,18 @@ class WindowsUIAContextProvider(ContextProvider):
         except Exception:
             return ""
 
-    def _page_number_from_ui(self) -> Optional[int]:
-        """The page the viewer says it is showing, read from its own toolbar.
+    def _page_number_from_ui(self) -> Optional[tuple[int, int]]:
+        """The ``(page, total)`` the viewer says it is showing, read from its own toolbar.
 
         macOS gets this from the window title because Preview puts it there. No Windows viewer
         does -- but they all show it, and UIA exposes it: measured in Foxit, a toolbar element
-        answers ``"1 / 1"``, which is a format ``parse_page_number`` already understands. So the
-        page comes from the same place the reader sees it.
+        answers ``"1 / 1"``. The TOTAL comes back too, because it is the only way to tell that
+        control apart from a find bar reading ``"3 of 17"``; the caller checks it against the
+        document.
+
+        The node's WHOLE text must be the reading, allowing only a "Page " prefix -- that is a
+        real page-box format. A substring match would accept a date in a comments pane
+        ("9/12/2025") or any sentence that happens to contain "1 of 3".
 
         Bounded and shallow on purpose: the control is in the toolbar, a few levels below the
         window, and this runs before the "+" appears.
@@ -430,9 +450,11 @@ class WindowsUIAContextProvider(ContextProvider):
                 scanned += 1
                 if self._out_of_time():
                     return None
-                page = parse_page_number(self._text_of(node))
-                if page is not None:
-                    return page
+                text = (self._text_of(node) or "").strip()
+                if _PAGE_READING_RE.fullmatch(text):
+                    position = parse_page_position(text)
+                    if position is not None:
+                        return position
                 if depth < _PAGE_SCAN_DEPTH:
                     for child in self._children_of(node):
                         queue.append((child, depth + 1))
