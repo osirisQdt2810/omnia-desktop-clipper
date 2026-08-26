@@ -51,7 +51,9 @@ def make_icns() -> Path | None:
         # macOS iconset: each logical size at 1x and 2x, with the exact required filenames.
         for logical in (16, 32, 128, 256, 512):
             plus_pixmap(logical).save(str(iconset / f"icon_{logical}x{logical}.png"))
-            plus_pixmap(logical * 2).save(str(iconset / f"icon_{logical}x{logical}@2x.png"))
+            plus_pixmap(logical * 2).save(
+                str(iconset / f"icon_{logical}x{logical}@2x.png")
+            )
         icns = Path("build") / "omnia.icns"
         subprocess.check_call(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)])
         return icns
@@ -80,12 +82,45 @@ def build_args(icon: Path | None = None) -> list[str]:
         "--collect-submodules",
         "pynput",
     ]
+    if sys.platform.startswith("win"):
+        # comtypes GENERATES its typed wrapper for UIAutomationCore.dll at first use and writes
+        # it into comtypes/gen/. A frozen app has nowhere to write and PyInstaller's analysis
+        # cannot see a module that does not exist yet, so the wrapper is generated HERE, before
+        # the freeze, and then collected by name. Without this the context lookup raises on the
+        # user's machine and every Windows capture silently loses its sentence -- the exact
+        # thing this backend was written to fix.
+        _generate_comtypes_uia_wrapper()
+        args += [
+            "--hidden-import",
+            "comtypes.gen.UIAutomationClient",
+            "--collect-submodules",
+            "comtypes",
+        ]
     if icon is not None:
         args += ["--icon", str(icon)]
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "com.omnia.desktopclipper"]
     args += ["run_desktop_clipper.py"]
     return args
+
+
+def _generate_comtypes_uia_wrapper() -> None:
+    """Pre-generate ``comtypes.gen.UIAutomationClient`` so the freeze can bundle it.
+
+    Best-effort: a build machine without the type library still produces a working app for
+    every other feature, and the context lookup degrades to returning the selection the way it
+    does for any other UIA failure.
+    """
+    try:
+        import comtypes.client
+
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        print("Generated comtypes wrapper for UIAutomationCore.dll")
+    except Exception as exc:  # pragma: no cover - build-machine specific
+        print(f"WARNING: could not pre-generate the UI Automation wrapper ({exc}).")
+        print(
+            "         The frozen app will fall back to selection-only context on Windows."
+        )
 
 
 def sign_app(app_path: Path) -> None:
@@ -122,9 +157,13 @@ def sign_app(app_path: Path) -> None:
                 str(app_path),
             ]
         )
-        print(f"Signed {app_path.name} with a stable identifier requirement ({BUNDLE_ID}).")
+        print(
+            f"Signed {app_path.name} with a stable identifier requirement ({BUNDLE_ID})."
+        )
     except (subprocess.CalledProcessError, OSError) as exc:
-        print(f"Warning: could not re-sign the app ({exc}); permissions may reset each rebuild.")
+        print(
+            f"Warning: could not re-sign the app ({exc}); permissions may reset each rebuild."
+        )
 
 
 def install_app() -> Path | None:
