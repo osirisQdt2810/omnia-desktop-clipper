@@ -185,17 +185,19 @@ class TestTheSearchIsTheSharedOne:
         assert "find_text_containing" in called
         assert "sentence_around" in called
 
-    def test_the_shallowest_container_wins(self) -> None:
-        """Breadth-first: the tightest node holding the selection, not the whole document."""
-        provider = WindowsUIAContextProvider()
-        inner = _Node("The tight sentence with fox in it. Trailing.")
-        outer = _Node(
-            "Everything. The tight sentence with fox in it. Trailing. More.", [inner]
-        )
-        _wire(provider, focus=outer)
+    def test_the_shallowest_node_holding_the_selection_wins(self) -> None:
+        """Breadth-first, so a deep fragment does not beat the container that holds the word.
 
-        # Both contain it; the outer is the root and is returned first by design.
-        assert "fox" in provider.resolve("fox")
+        The previous version asserted only that the answer contained "fox", which every
+        possible answer does -- it could not have failed.
+        """
+        provider = WindowsUIAContextProvider()
+        deep = _Node("fox")  # a fragment: the word alone, no sentence around it
+        shallow = _Node("The container sentence has a fox in it. Trailing.", [deep])
+        root = _Node("", [shallow])
+        _wire(provider, focus=root)
+
+        assert provider.resolve("fox") == "The container sentence has a fox in it."
 
 
 class _FakeWalker:
@@ -217,7 +219,27 @@ class _FakeWalker:
 
 
 class _FakeAutomation:
+    """The slice of IUIAutomation the provider calls, including both entry points.
+
+    `ElementFromPoint` and `GetFocusedElement` are here because without them nothing tested
+    them: a wrong method name or a bad POINT type is swallowed by the `except Exception` that
+    makes this backend degrade gracefully, so it would silently return selection-only -- the
+    exact bug this backend fixes, with a green suite.
+    """
+
     ControlViewWalker = _FakeWalker()
+
+    def __init__(self, *, at_point=None, focused=None) -> None:
+        self._at_point = at_point
+        self._focused = focused
+        self.points: list = []
+
+    def ElementFromPoint(self, point):  # noqa: N802 - UIA's own spelling
+        self.points.append((point.x, point.y))
+        return self._at_point
+
+    def GetFocusedElement(self):  # noqa: N802 - UIA's own spelling
+        return self._focused
 
 
 class _FakeModule:
@@ -363,3 +385,176 @@ class _FakePattern:
     @property
     def CurrentValue(self):  # noqa: N802 - UIA's own spelling
         return self._text
+
+
+class _RangeElement:
+    """An element whose TextPattern answers RangeFromPoint, the way a text control does."""
+
+    def __init__(self, paragraphs, *, y_step: int = 20, top: int = 100) -> None:
+        self._paragraphs = paragraphs
+        self._y_step = y_step
+        self._top = top
+        self.CurrentName = "Text editor"
+
+    def GetCurrentPattern(self, pattern_id):  # noqa: N802 - UIA's own spelling
+        if pattern_id != 1:
+            return None
+        return _RangePattern(self)
+
+    def paragraph_at(self, y: int) -> str:
+        index = max(0, (y - self._top) // self._y_step)
+        return self._paragraphs[min(index, len(self._paragraphs) - 1)]
+
+
+class _RangePattern:
+    def __init__(self, element) -> None:
+        self._element = element
+        self._text = ""
+
+    def QueryInterface(self, _iface):  # noqa: N802 - COM's own spelling
+        return self
+
+    @property
+    def DocumentRange(self):  # noqa: N802 - UIA's own spelling
+        return self
+
+    def RangeFromPoint(self, point):  # noqa: N802 - UIA's own spelling
+        clone = _RangePattern(self._element)
+        clone._text = self._element.paragraph_at(point.y)
+        return clone
+
+    def ExpandToEnclosingUnit(self, _unit):  # noqa: N802 - UIA's own spelling
+        return None
+
+    def GetText(self, _max):  # noqa: N802 - UIA's own spelling
+        return self._text
+
+
+class TestTheEntryPoints:
+    """`_context_at_position` and `_context_from_focus` are the whole path in, and had no test."""
+
+    @staticmethod
+    def _provider(*, at_point=None, focused=None):
+        provider = WindowsUIAContextProvider()
+        automation = _FakeAutomation(at_point=at_point, focused=focused)
+        provider._uia = lambda: (automation, _FakeModule())  # type: ignore[method-assign]
+        return provider, automation
+
+    def test_the_point_route_reaches_the_element_under_the_cursor(self) -> None:
+        node = _Node("The sentence at the point. Another one.")
+        provider, automation = self._provider(at_point=node)
+        provider._text_of = lambda n: n.text  # type: ignore[method-assign]
+
+        assert provider._context_at_position("point", (17, 42)) == (
+            "The sentence at the point."
+        )
+        assert automation.points == [
+            (17, 42)
+        ], "the gesture point was not passed through"
+
+    def test_the_focus_route_reaches_the_focused_element(self) -> None:
+        node = _Node("The sentence in focus. Another one.")
+        provider, _automation = self._provider(focused=node)
+        provider._text_of = lambda n: n.text  # type: ignore[method-assign]
+
+        assert provider._context_from_focus("focus") == "The sentence in focus."
+
+    def test_no_element_under_the_point_is_not_an_error(self) -> None:
+        provider, _automation = self._provider(at_point=None)
+        assert provider._context_at_position("anything", (1, 2)) == ""
+
+    def test_no_focused_element_is_not_an_error(self) -> None:
+        provider, _automation = self._provider(focused=None)
+        assert provider._context_from_focus("anything") == ""
+
+
+class TestRangeFromPoint:
+    """The route that makes the gesture point mean something.
+
+    Without it the point bought nothing for a native text control: `GetText(-1)` returns the
+    WHOLE document and the search then takes the FIRST occurrence, so clicking the second
+    paragraph returned the first paragraph's sentence. Verified live on a real Notepad document
+    where the same word resolves to two different sentences depending on where it was clicked.
+    """
+
+    @staticmethod
+    def _provider(paragraphs):
+        provider = WindowsUIAContextProvider()
+        automation = _FakeAutomation(at_point=_RangeElement(paragraphs))
+        provider._uia = lambda: (automation, _FakeModule())  # type: ignore[method-assign]
+        return provider
+
+    def test_a_repeated_word_resolves_to_the_paragraph_clicked(self) -> None:
+        provider = self._provider(
+            [
+                "The quick brown fox jumps over the dog.",
+                "A second sentence mentions the fox again, elsewhere.",
+            ]
+        )
+
+        assert provider.resolve("fox", position=(5, 100)) == (
+            "The quick brown fox jumps over the dog."
+        )
+        assert provider.resolve("fox", position=(5, 120)) == (
+            "A second sentence mentions the fox again, elsewhere."
+        )
+
+    def test_a_paragraph_without_the_word_yields_nothing_rather_than_something_wrong(
+        self,
+    ) -> None:
+        """The point landed on a margin or a different column. Silence beats a wrong sentence."""
+        provider = self._provider(["No match here at all.", "Nor here."])
+
+        assert provider._paragraph_at_point("fox", (5, 100)) == ""
+
+    def test_an_element_without_a_text_pattern_falls_through(self) -> None:
+        """Most of Chromium. The caller then searches the subtree instead."""
+        provider = WindowsUIAContextProvider()
+        automation = _FakeAutomation(at_point=_Node("no text pattern here"))
+        provider._uia = lambda: (automation, _FakeModule())  # type: ignore[method-assign]
+
+        assert provider._paragraph_at_point("fox", (1, 2)) == ""
+
+
+class TestItDoesNotSitOnTheQtThread:
+    """ "Never block the Qt event loop": the "+" is shown right after resolve() returns."""
+
+    def test_the_sibling_walk_stops_at_the_cap(self) -> None:
+        """Each GetNextSiblingElement is a cross-process round trip.
+
+        A 5,000-row list walked to completion is 5,000 of them before the "+" appears, and the
+        search's own cap then discards all but 60 -- after they have been paid for.
+        """
+        from omnia_desktop_clipper.capture.context import _MAX_CHILDREN
+
+        root = _Node("root", [_Node(str(i)) for i in range(5000)])
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
+
+        assert len(provider._children_of(root)) == _MAX_CHILDREN
+
+    def test_a_spent_budget_stops_the_walk(self) -> None:
+        """The deadline bounds the PAIR of routes, which max_nodes cannot: it is per search."""
+        import time
+
+        root = _Node("root", [_Node(str(i)) for i in range(50)])
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
+        provider._deadline = time.monotonic() - 1  # already spent
+
+        assert len(provider._children_of(root)) == 1
+
+    def test_resolve_sets_and_clears_the_deadline(self) -> None:
+        provider = WindowsUIAContextProvider()
+        seen = {}
+
+        def spy(selection):
+            seen["deadline"] = provider._deadline
+            return ""
+
+        provider._context_from_focus = spy  # type: ignore[method-assign]
+
+        provider.resolve("word")
+
+        assert seen["deadline"] is not None, "no budget was set for the capture"
+        assert provider._deadline is None, "the budget outlived the capture"

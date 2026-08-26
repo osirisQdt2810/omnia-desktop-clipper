@@ -13,9 +13,13 @@ Measured on this machine: the focused element in VS Code is a ``Pane`` of class
 descendants. In Notepad the focused window's text is four levels down, in a ``Document`` of class
 ``RichEditD2DPT``. So this does the same two things the macOS backend does:
 
-1. **Prefer the point the user gestured at.** ``ElementFromPoint`` resolves to the smallest
-   element at a screen coordinate, which is the paragraph they were reading — that is what makes
-   a repeated word resolvable rather than guessed.
+1. **Read the text AT the point the user gestured at.** ``RangeFromPoint`` answers with a
+   range at the cursor, which expanded to its paragraph is the text they were actually looking
+   at. This is the only route that disambiguates a repeated word: a native text control answers
+   ``GetText(-1)`` with the WHOLE document, so searching it returns the FIRST occurrence
+   wherever it happens to be. Verified on a two-paragraph document where "fox" appears twice —
+   clicking each paragraph returns its own sentence. ``ElementFromPoint`` alone is the weaker
+   second try, for controls with no TextPattern.
 2. **Search the subtree** for the node whose text CONTAINS the selection, rather than trusting
    whichever element has focus.
 
@@ -33,19 +37,37 @@ not a crash.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
-from .base import SelectionCapture  # noqa: F401  (documents the sibling seam)
-from .context import ContextProvider, find_text_containing, sentence_around
+from .context import (
+    _AX_TIMEOUT_SECONDS,
+    _MAX_ANCESTOR_HOPS,
+    _MAX_CHILDREN,
+    ContextProvider,
+    find_text_containing,
+    sentence_around,
+)
 
 #: ``CUIAutomation``'s class id. Hard-coded because there is nothing to look it up from: the
 #: automation client is the entry point to everything else here.
 _CUIAUTOMATION_CLSID = "{ff48dba4-60ef-4201-aa87-54103eef594e}"
 
-#: How many ancestors above the hit element to try when the hit itself carries no text. A point
-#: can land on a wrapper (a cell inside a row inside a table); the text is usually one or two
-#: levels up, and going further starts returning the whole window.
-_ANCESTOR_LEVELS = 4
+#: ``CUIAutomation8``'s class id, which yields ``IUIAutomation2`` and its timeouts. Tried first;
+#: a machine that only offers the older client still works, just without them.
+_CUIAUTOMATION8_CLSID = "{e22ad333-b25f-460c-83d0-0581107395c9}"
+
+#: Total wall clock one resolve may spend inside UIA, across BOTH routes.
+#:
+#: The per-call timeouts above are not enough on their own. The expensive case is the one this
+#: module documents as cheap: in a PDF viewer no node exposes text, so the point route spends
+#: its whole node budget finding nothing, and then the focus route starts a FRESH budget --
+#: ``max_nodes`` is per search, not per capture. A deadline is what bounds the pair, and it is
+#: what keeps the "+" appearing promptly rather than after the slowest app on the machine.
+_UIA_BUDGET_SECONDS = 1.0
+
+#: UIA's TextUnit_Paragraph. Used with ``RangeFromPoint`` to read the text AT the cursor.
+_TEXT_UNIT_PARAGRAPH = 4
 
 
 class WindowsUIAContextProvider(ContextProvider):
@@ -60,6 +82,8 @@ class WindowsUIAContextProvider(ContextProvider):
         # activation on the Qt main thread for no benefit -- the object is stateless.
         self._automation: Any = None
         self._module: Any = None
+        # Set for the duration of one resolve(); see _UIA_BUDGET_SECONDS.
+        self._deadline: Optional[float] = None
 
     # -- COM plumbing -------------------------------------------------------------------------
 
@@ -75,11 +99,39 @@ class WindowsUIAContextProvider(ContextProvider):
             import comtypes.client
 
             module = comtypes.client.GetModule("UIAutomationCore.dll")
-            self._automation = comtypes.client.CreateObject(
-                _CUIAUTOMATION_CLSID, interface=module.IUIAutomation
-            )
+            self._automation = self._create_client(comtypes.client, module)
             self._module = module
         return self._automation, self._module
+
+    @staticmethod
+    def _create_client(client: Any, module: Any) -> Any:
+        """The automation client, with per-call timeouts when this Windows offers them.
+
+        ``CUIAutomation8`` yields ``IUIAutomation2``, which has ``ConnectionTimeout`` and
+        ``TransactionTimeout``. Without them a call into a hung application blocks on COM's own
+        RPC timeout, which is far longer than anything acceptable here -- the "+" is shown right
+        after this returns, so a stuck app would stall the gesture. macOS sets the same kind of
+        bound with ``AXUIElementSetMessagingTimeout``.
+
+        Falls back to the plain client rather than failing: an older Windows still gets context,
+        bounded by the wall-clock deadline instead.
+        """
+        milliseconds = int(_AX_TIMEOUT_SECONDS * 1000)
+        try:
+            automation = client.CreateObject(
+                _CUIAUTOMATION8_CLSID, interface=module.IUIAutomation2
+            )
+            automation.ConnectionTimeout = milliseconds
+            automation.TransactionTimeout = milliseconds
+            return automation
+        except Exception:
+            return client.CreateObject(
+                _CUIAUTOMATION_CLSID, interface=module.IUIAutomation
+            )
+
+    def _out_of_time(self) -> bool:
+        """Whether this capture has spent its UIA budget."""
+        return self._deadline is not None and time.monotonic() > self._deadline
 
     def _text_of(self, element: Any) -> str:
         """The element's text, by the first route that yields any.
@@ -124,12 +176,20 @@ class WindowsUIAContextProvider(ContextProvider):
         spend.
         """
         automation, _module = self._uia()
-        children = []
+        children: list = []
         try:
             walker = automation.ControlViewWalker
             child = walker.GetFirstChildElement(element)
-            while child:
+            # STOP AT THE CAP, not after. Each GetNextSiblingElement is a cross-process COM
+            # round trip, so walking a 5,000-row Explorer list or a day-old chat transcript to
+            # completion costs 5,000 of them -- on the Qt main thread, before the "+" appears.
+            # The search's own max_children applies only to what it is HANDED, so it would
+            # discard 4,940 results that had already been paid for. macOS never had this
+            # problem: AXChildren returns the whole array in one marshalled call.
+            while child and len(children) < _MAX_CHILDREN:
                 children.append(child)
+                if self._out_of_time():
+                    break
                 child = walker.GetNextSiblingElement(child)
         except Exception:
             return children
@@ -142,7 +202,7 @@ class WindowsUIAContextProvider(ContextProvider):
         try:
             walker = automation.ControlViewWalker
             node = element
-            for _ in range(_ANCESTOR_LEVELS):
+            for _ in range(_MAX_ANCESTOR_HOPS):
                 node = walker.GetParentElement(node)
                 if not node:
                     break
@@ -159,19 +219,68 @@ class WindowsUIAContextProvider(ContextProvider):
         selection = selection.strip()
         if not selection:
             return selection
-        # The gesture POINT first, for the same reason macOS tries it first: the element under
-        # it is the paragraph the user was actually reading, so a word that appears five times
-        # on the page resolves to the occurrence they meant.
-        if position is not None:
-            located = self._context_at_position(selection, position)
-            if located:
-                return located
-        located = self._context_from_focus(selection)
-        return located or selection
+        self._deadline = time.monotonic() + _UIA_BUDGET_SECONDS
+        try:
+            if position is not None:
+                # The text AT the point, when the control can give it. This is the only route
+                # that genuinely disambiguates a repeated word -- see _paragraph_at_point.
+                located = self._paragraph_at_point(selection, position)
+                if located:
+                    return located
+                located = self._context_at_position(selection, position)
+                if located:
+                    return located
+            located = self._context_from_focus(selection)
+            return located or selection
+        finally:
+            self._deadline = None
 
-    def _context_at_position(
-        self, selection: str, position: tuple[int, int]
-    ) -> str:  # pragma: no cover - needs a live Windows desktop
+    def _paragraph_at_point(self, selection: str, position: tuple[int, int]) -> str:
+        """The sentence around the point, read from the range UIA reports AT that point.
+
+        This exists because searching an element's whole text cannot honour the gesture. A
+        native text control answers ``GetText(-1)`` with the ENTIRE document, and the search
+        then takes ``text.find(selection)`` -- the FIRST occurrence, wherever it is. On the
+        two-paragraph document used to verify this backend, "fox" appears twice and the first
+        occurrence was returned no matter which one the user double-clicked.
+
+        ``RangeFromPoint`` answers with a degenerate range at the cursor, and expanding it to
+        its enclosing paragraph gives the text the reader is actually looking at. That is what
+        the point was always supposed to buy.
+
+        Returns ``""`` for a control with no TextPattern (most of Chromium), where the caller
+        falls back to searching the subtree.
+        """
+        try:
+            from ctypes.wintypes import POINT
+
+            automation, module = self._uia()
+            element = automation.ElementFromPoint(
+                POINT(int(position[0]), int(position[1]))
+            )
+            if not element:
+                return ""
+            raw = element.GetCurrentPattern(module.UIA_TextPatternId)
+            if not raw:
+                return ""
+            pattern = raw.QueryInterface(module.IUIAutomationTextPattern)
+            text_range = pattern.RangeFromPoint(
+                POINT(int(position[0]), int(position[1]))
+            )
+            if not text_range:
+                return ""
+            text_range.ExpandToEnclosingUnit(_TEXT_UNIT_PARAGRAPH)
+            paragraph = str(text_range.GetText(-1) or "")
+        except Exception:
+            return ""
+        index = paragraph.find(selection)
+        if index < 0:
+            # The paragraph under the cursor does not contain the word -- the point landed on a
+            # margin, or the selection spans a break. Say nothing rather than something wrong.
+            return ""
+        return sentence_around(paragraph, index, len(selection))
+
+    def _context_at_position(self, selection: str, position: tuple[int, int]) -> str:
         """The sentence around ``selection`` under ``position``, or ``""``."""
         try:
             from ctypes.wintypes import POINT
@@ -186,9 +295,7 @@ class WindowsUIAContextProvider(ContextProvider):
         except Exception:
             return ""
 
-    def _context_from_focus(
-        self, selection: str
-    ) -> str:  # pragma: no cover - needs a live Windows desktop
+    def _context_from_focus(self, selection: str) -> str:
         """The sentence around ``selection`` in the focused element's subtree, or ``""``."""
         try:
             automation, _module = self._uia()
