@@ -55,9 +55,23 @@ class TestProviders:
     def test_selection_provider_returns_selection(self) -> None:
         assert SelectionContextProvider().resolve("hello world") == "hello world"
 
-    def test_build_is_fallback_off_macos(self) -> None:
+    def test_build_is_uia_on_windows(self) -> None:
+        """Windows used to get the selection back as its own "context".
+
+        That is what this test asserted until Windows had a backend: the same gesture in the
+        same app produced a card with the sentence on macOS and a card with the word twice on
+        Windows.
+        """
+        from omnia_desktop_clipper.capture.windows_context import (
+            WindowsUIAContextProvider,
+        )
+
+        assert isinstance(build_context_provider("win32"), WindowsUIAContextProvider)
+
+    def test_build_is_still_the_fallback_on_linux(self) -> None:
+        """Deliberately unchanged: reading the focused window on Linux means X11 or a
+        compositor-specific Wayland protocol, which is a different job from this one."""
         assert isinstance(build_context_provider("linux"), SelectionContextProvider)
-        assert isinstance(build_context_provider("win32"), SelectionContextProvider)
 
     def test_build_is_ax_on_macos(self) -> None:
         assert isinstance(build_context_provider("darwin"), MacAXContextProvider)
@@ -70,7 +84,9 @@ class TestProviders:
 class TestMacAXResolve:
     """resolve() uses the focused text when available and always degrades to the selection."""
 
-    def test_extracts_sentence_when_surrounding_text_available(self, monkeypatch) -> None:
+    def test_extracts_sentence_when_surrounding_text_available(
+        self, monkeypatch
+    ) -> None:
         prov = MacAXContextProvider()
         monkeypatch.setattr(
             prov, "_surrounding_text", lambda selection: "Intro. The word is here. End."
@@ -86,7 +102,9 @@ class TestMacAXResolve:
         monkeypatch.setattr(prov, "_surrounding_text", boom)
         assert prov.resolve("word") == "word"
 
-    def test_falls_back_when_selection_not_in_surrounding_text(self, monkeypatch) -> None:
+    def test_falls_back_when_selection_not_in_surrounding_text(
+        self, monkeypatch
+    ) -> None:
         prov = MacAXContextProvider()
         monkeypatch.setattr(
             prov, "_surrounding_text", lambda selection: "completely different text"
@@ -125,39 +143,55 @@ class TestFindTextContaining:
     def test_finds_value_on_the_focused_node_itself(self):
         # TextEdit shape: the focused text area carries the whole text.
         focused = _Node("The boy plunged in anyway. He loved it.")
-        assert find_text_containing(
-            [focused], "plunged", _value_of, _children_of
-        ) == "The boy plunged in anyway. He loved it."
+        assert (
+            find_text_containing([focused], "plunged", _value_of, _children_of)
+            == "The boy plunged in anyway. He loved it."
+        )
 
     def test_finds_text_in_a_descendant_when_focused_value_is_empty(self):
         # Chrome shape: focused AXWebArea has an EMPTY value; the text is a static-text child.
         para = _Node("The water was cold, but the boy plunged in anyway.")
         web_area = _Node("", [_Node(""), _Node("", [para])])
-        assert find_text_containing([web_area], "plunged", _value_of, _children_of) == para.value
+        assert (
+            find_text_containing([web_area], "plunged", _value_of, _children_of)
+            == para.value
+        )
 
     def test_prefers_the_shallowest_container(self):
         # Breadth-first: the tightest enclosing block wins over a deeper fragment.
         shallow = _Node("a plunged b")
         deep = _Node("", [_Node("", [_Node("xx plunged yy zz")])])
         root = _Node("", [shallow, deep])
-        assert find_text_containing([root], "plunged", _value_of, _children_of) == "a plunged b"
+        assert (
+            find_text_containing([root], "plunged", _value_of, _children_of)
+            == "a plunged b"
+        )
 
     def test_ignores_a_node_holding_only_the_selection(self):
         # A node whose value IS the selection adds no context; keep searching.
         only = _Node("plunged")
         real = _Node("the boy plunged in")
         root = _Node("", [only, real])
-        assert find_text_containing([root], "plunged", _value_of, _children_of) == "the boy plunged in"
+        assert (
+            find_text_containing([root], "plunged", _value_of, _children_of)
+            == "the boy plunged in"
+        )
 
     def test_falls_through_roots_in_order(self):
         empty = _Node("", [])
         window = _Node("", [_Node("he plunged in")])
-        assert find_text_containing(
-            [empty, window], "plunged", _value_of, _children_of
-        ) == "he plunged in"
+        assert (
+            find_text_containing([empty, window], "plunged", _value_of, _children_of)
+            == "he plunged in"
+        )
 
     def test_returns_empty_when_nothing_matches(self):
-        assert find_text_containing([_Node("nothing here")], "plunged", _value_of, _children_of) == ""
+        assert (
+            find_text_containing(
+                [_Node("nothing here")], "plunged", _value_of, _children_of
+            )
+            == ""
+        )
 
     def test_empty_selection_returns_empty(self):
         assert find_text_containing([_Node("x")], "", _value_of, _children_of) == ""
@@ -177,12 +211,22 @@ class TestFindTextContaining:
             cursor.children = [child]
             cursor = child
         cursor.value = "the boy plunged in"  # beyond the depth limit
-        assert find_text_containing([deep], "plunged", counting_value, _children_of, max_nodes=10) == ""
+        assert (
+            find_text_containing(
+                [deep], "plunged", counting_value, _children_of, max_nodes=10
+            )
+            == ""
+        )
         assert len(visits) <= 10
 
     def test_depth_limit_stops_descent(self):
         deep = _Node("", [_Node("", [_Node("the boy plunged in")])])
-        assert find_text_containing([deep], "plunged", _value_of, _children_of, max_depth=1) == ""
+        assert (
+            find_text_containing(
+                [deep], "plunged", _value_of, _children_of, max_depth=1
+            )
+            == ""
+        )
 
 
 class TestAccessibilityWarmer:

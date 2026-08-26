@@ -15,5 +15,9 @@ Pillow>=10.0
 numpy>=1.24
 
 # macOS only: read the sentence around the selection via the Accessibility API (context).
-# On Windows/Linux the clipper falls back to using the selection as the context.
 pyobjc-framework-ApplicationServices>=10.0 ; sys_platform == "darwin"
+
+# Windows only: the same job via UI Automation, which is COM. comtypes is pure Python (it
+# builds its wrappers with ctypes at runtime), so it adds no compiled wheel to the app.
+# On Linux the clipper still falls back to using the selection as the context.
+comtypes>=1.4 ; sys_platform == "win32"

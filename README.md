@@ -67,6 +67,8 @@ pip install -r requirements.txt
   models). Used only for the screen-OCR path.
 - **pyobjc-framework-ApplicationServices** (macOS only) — read the enclosing sentence via the
   Accessibility API for the *context*.
+- **comtypes** (Windows only) — the same job via UI Automation. Pure Python; it builds its COM
+  wrappers with `ctypes` at runtime, so it adds no compiled wheel.
 
 ## Run
 

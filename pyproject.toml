@@ -22,6 +22,10 @@ dependencies = [
     "Pillow>=10.0",
     "numpy>=1.24",
     "pyobjc-framework-ApplicationServices>=10.0 ; sys_platform == 'darwin'",
+    # Windows only: the same job via UI Automation (COM). Pure Python, so no compiled wheel.
+    # Without it `pip install .` yields a build whose Windows context lookup fails to import
+    # and silently returns the selection -- the bug the backend exists to fix.
+    "comtypes>=1.4 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

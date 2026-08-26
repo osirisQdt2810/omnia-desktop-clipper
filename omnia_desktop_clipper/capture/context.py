@@ -117,7 +117,10 @@ def _scan_left(text: str, start: int) -> int:
     while index > limit:
         if text[index - 1] in _SENTENCE_ENDERS:
             return index
-        if text[index - 1] == "\n" and text[max(0, index - 2) : index] == _PARAGRAPH_BREAK:
+        if (
+            text[index - 1] == "\n"
+            and text[max(0, index - 2) : index] == _PARAGRAPH_BREAK
+        ):
             return index
         index -= 1
     return index
@@ -187,7 +190,11 @@ def find_text_containing(
             visited += 1
             value = value_of(node)
             # Strictly longer: a node holding ONLY the selection adds no context.
-            if isinstance(value, str) and len(value) > len(selection) and selection in value:
+            if (
+                isinstance(value, str)
+                and len(value) > len(selection)
+                and selection in value
+            ):
                 return value
             if depth < max_depth:
                 children = children_of(node) or []
@@ -511,9 +518,12 @@ class MacAXContextProvider(ContextProvider):
 def build_context_provider(platform_name: str | None = None) -> ContextProvider:
     """Return the best context provider for the platform.
 
-    macOS gets :class:`MacAXContextProvider` (auto sentence via Accessibility, falling back
-    to the selection on any failure); every other platform gets
-    :class:`SelectionContextProvider`.
+    macOS gets :class:`MacAXContextProvider` (Accessibility) and Windows
+    :class:`~omnia_desktop_clipper.capture.windows_context.WindowsUIAContextProvider`
+    (UI Automation); both fall back to the selection on any failure. Linux still gets
+    :class:`SelectionContextProvider`, whose "context" is the selection itself — reading the
+    focused window's text there means X11 or a compositor-specific Wayland protocol, which is a
+    different job from this one.
 
     Args:
         platform_name: A ``sys.platform`` override (for tests). Defaults to the running OS.
@@ -521,4 +531,10 @@ def build_context_provider(platform_name: str | None = None) -> ContextProvider:
     platform_name = sys.platform if platform_name is None else platform_name
     if platform_name == "darwin":
         return MacAXContextProvider()
+    if platform_name.startswith("win"):
+        # Imported HERE, not at module scope: windows_context imports this module, and a
+        # top-level import would be circular. Its own COM dependency stays lazy inside it.
+        from .windows_context import WindowsUIAContextProvider
+
+        return WindowsUIAContextProvider()
     return SelectionContextProvider()
