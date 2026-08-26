@@ -229,10 +229,17 @@ class _FakeAutomation:
 
     ControlViewWalker = _FakeWalker()
 
-    def __init__(self, *, at_point=None, focused=None) -> None:
+    def __init__(self, *, at_point=None, focused=None, root=None) -> None:
         self._at_point = at_point
         self._focused = focused
+        self._root = root
         self.points: list = []
+
+    def GetRootElement(self):  # noqa: N802 - UIA's own spelling
+        return self._root
+
+    def CompareElements(self, a, b):  # noqa: N802 - UIA's own spelling
+        return a is b
 
     def ElementFromPoint(self, point):  # noqa: N802 - UIA's own spelling
         self.points.append((point.x, point.y))
@@ -274,6 +281,46 @@ class TestTheComAdjacentWalksThemselves:
         chain = provider._ancestors_of(leaf)
 
         assert [n.text for n in chain] == ["leaf", "middle", "root"]
+
+    def test_ancestors_stops_at_the_desktop_root(self) -> None:
+        """The climb must not leave the application.
+
+        In UIA the parent of a top-level window IS the desktop, whose children are every
+        window of every running app. Handing that to the search lets it descend into other
+        people's applications and return a "sentence" from a background browser title -- one
+        that passes every downstream check, because the word really is in it. macOS cannot do
+        this: its climb starts from the application element.
+        """
+        edit = _Node("the text")
+        window = _Node("Some App", [edit])
+        desktop = _Node("Desktop 1", [window])
+        provider = self._provider_over(desktop)
+        provider._uia = lambda: (  # type: ignore[method-assign]
+            _FakeAutomation(root=desktop),
+            _FakeModule(),
+        )
+
+        chain = provider._ancestors_of(edit)
+
+        assert (
+            desktop not in chain
+        ), "the search would have descended into other applications"
+        assert [n.text for n in chain] == ["the text", "Some App"]
+
+    def test_the_top_level_window_is_the_last_root(self) -> None:
+        """macOS appends AXFocusedWindow as a final root; capping the climb gives the same."""
+        edit = _Node("")
+        window = _Node("The window holds the sentence about policy. Trailing.", [edit])
+        desktop = _Node("Desktop 1", [window])
+        provider = self._provider_over(desktop)
+        provider._uia = lambda: (  # type: ignore[method-assign]
+            _FakeAutomation(root=desktop),
+            _FakeModule(),
+        )
+
+        assert provider._sentence_in(provider._ancestors_of(edit), "policy") == (
+            "The window holds the sentence about policy."
+        )
 
     def test_ancestors_is_bounded(self) -> None:
         """A deep tree must not be climbed to the desktop; the sentence is never up there."""
@@ -543,6 +590,55 @@ class TestItDoesNotSitOnTheQtThread:
         provider._deadline = time.monotonic() - 1  # already spent
 
         assert len(provider._children_of(root)) == 1
+
+    def test_a_spent_budget_stops_reading_text(self) -> None:
+        """`_text_of` is the bulk of the cost -- up to three round trips per node.
+
+        A budget that guarded only the sibling walk was not the bound its own docstring
+        claimed: the already-queued BFS frontier would still be drained through here at full
+        rate after the deadline passed.
+        """
+        import time
+
+        calls = {"n": 0}
+
+        class _Counting:
+            def GetCurrentPattern(self, _id):  # noqa: N802 - UIA's own spelling
+                calls["n"] += 1
+                return None
+
+            CurrentName = "some text"
+
+        provider = WindowsUIAContextProvider()
+        provider._uia = lambda: (_FakeAutomation(), _FakeModule())  # type: ignore[method-assign]
+        provider._deadline = time.monotonic() - 1
+
+        assert provider._text_of(_Counting()) == ""
+        assert calls["n"] == 0, "a spent budget still paid for COM round trips"
+
+    def test_the_second_route_is_skipped_when_the_budget_is_gone(self) -> None:
+        """The point route can spend everything finding nothing -- that is the PDF case.
+
+        Starting a second full search then doubles the wait before the "+" appears, for a
+        result already known to be unlikely.
+        """
+        provider = WindowsUIAContextProvider()
+        reached = {"focus": False}
+
+        def slow_point(selection, position):
+            provider._deadline = 0.0  # the budget is gone by the time this returns
+            return ""
+
+        def focus(selection):
+            reached["focus"] = True
+            return "should not be reached"
+
+        provider._paragraph_at_point = lambda s, p: ""  # type: ignore[method-assign]
+        provider._context_at_position = slow_point  # type: ignore[method-assign]
+        provider._context_from_focus = focus  # type: ignore[method-assign]
+
+        assert provider.resolve("word", position=(1, 2)) == "word"
+        assert not reached["focus"]
 
     def test_resolve_sets_and_clears_the_deadline(self) -> None:
         provider = WindowsUIAContextProvider()

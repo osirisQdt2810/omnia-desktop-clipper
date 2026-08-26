@@ -142,6 +142,11 @@ class WindowsUIAContextProvider(ContextProvider):
         with both patterns empty. Trying them in this order returns the most text available
         rather than the first thing that happens to be non-null.
         """
+        if self._out_of_time():
+            # _text_of is the bulk of the cost -- up to three cross-process round trips per
+            # node -- so a budget that only guarded the sibling walk was not the bound its
+            # own docstring claimed.
+            return ""
         _automation, module = self._uia()
         try:
             pattern = element.GetCurrentPattern(module.UIA_TextPatternId)
@@ -196,17 +201,37 @@ class WindowsUIAContextProvider(ContextProvider):
         return children
 
     def _ancestors_of(self, element: Any) -> list:
-        """``element`` followed by a few of its ancestors, nearest first."""
+        """``element`` followed by a few of its ancestors, STOPPING AT THE DESKTOP.
+
+        The stop is the whole point. In UIA the parent of a top-level window is the desktop
+        root, whose children are every top-level window of every running application — so an
+        unbounded climb hands the search a root from which it can descend into other people's
+        apps. The first node whose text contains the word then wins, and since ``_text_of``
+        falls back to ``CurrentName``, a background browser window titled
+        "policy - Google Search" is eligible. The card would be stamped with a sentence from an
+        application the user was never reading, and it passes every downstream check because
+        the word really is in it.
+
+        macOS cannot do this and that is why the bug is Windows-only: its climb starts from
+        ``AXUIElementCreateApplication(pid)``, so ``AXParent`` tops out at that application.
+        This restores the same ceiling.
+
+        The last element of the chain is therefore the top-level window, which is also the
+        equivalent of the ``AXFocusedWindow`` root macOS appends — deliberately, not by
+        accident.
+        """
         automation, _module = self._uia()
         chain = [element]
         try:
             walker = automation.ControlViewWalker
+            root = automation.GetRootElement()
             node = element
             for _ in range(_MAX_ANCESTOR_HOPS):
-                node = walker.GetParentElement(node)
-                if not node:
+                parent = walker.GetParentElement(node)
+                if not parent or automation.CompareElements(parent, root):
                     break
-                chain.append(node)
+                chain.append(parent)
+                node = parent
         except Exception:
             pass
         return chain
@@ -230,6 +255,11 @@ class WindowsUIAContextProvider(ContextProvider):
                 located = self._context_at_position(selection, position)
                 if located:
                     return located
+            if self._out_of_time():
+                # The point route can spend the whole budget finding nothing -- that is the
+                # PDF case. Starting a second full search then doubles the wait for a result
+                # that is already known to be unlikely.
+                return selection
             located = self._context_from_focus(selection)
             return located or selection
         finally:
