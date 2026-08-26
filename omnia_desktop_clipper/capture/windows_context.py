@@ -165,6 +165,12 @@ class WindowsUIAContextProvider(ContextProvider):
                 _CUIAUTOMATION_CLSID, interface=module.IUIAutomation
             )
 
+    def _time_left(self) -> float:
+        """Seconds remaining in the current budget (0.0 when there is none set or none left)."""
+        if self._deadline is None:
+            return 0.0
+        return max(0.0, self._deadline - time.monotonic())
+
     def _out_of_time(self) -> bool:
         """Whether this capture has spent its UIA budget."""
         return self._deadline is not None and time.monotonic() > self._deadline
@@ -410,7 +416,10 @@ class WindowsUIAContextProvider(ContextProvider):
             # the page scan below walks the window tree with cross-process calls per node.
             if not title or not pid or not pdf_name_from_title(title):
                 return ""
-            path = open_pdf_for(pid, title)
+            # Its own remaining budget, so a WMI lookup cannot outlive the route that owns
+            # it -- a fixed constant larger than _PDF_BUDGET_SECONDS would have made the
+            # budget's docstring untrue by 200 ms.
+            path = open_pdf_for(pid, title, self._time_left())
             if not path or not is_pdf(path):
                 return ""
             position = parse_page_position(title) or self._page_number_from_ui(window)

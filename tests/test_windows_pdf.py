@@ -121,7 +121,9 @@ class TestOpenPdfFor:
         import omnia_desktop_clipper.capture.windows_pdf as module
 
         monkeypatch.setattr(
-            module, "foreground_command_line", lambda _pid: command_line
+            module,
+            "foreground_command_line",
+            lambda _pid, _timeout=None: command_line,
         )
 
     def test_it_returns_the_path_when_title_and_command_line_agree(
@@ -139,7 +141,7 @@ class TestOpenPdfFor:
 
         import omnia_desktop_clipper.capture.windows_pdf as module
 
-        def counting(_pid):
+        def counting(_pid, _timeout=None):
             called["n"] += 1
             return _FOXIT
 

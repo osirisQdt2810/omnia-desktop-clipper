@@ -119,7 +119,7 @@ def _query_command_line(pid: int) -> str:
     return ""
 
 
-def foreground_command_line(pid: int) -> str:
+def foreground_command_line(pid: int, timeout: Optional[float] = None) -> str:
     """Return the command line of process ``pid``, or ``""``.
 
     WMI over COM rather than spawning PowerShell: measured at ~20 ms to connect and ~66 ms for a
@@ -134,9 +134,21 @@ def foreground_command_line(pid: int) -> str:
     no "+", frozen tray, on every capture while the condition lasts. That is a hang, not the
     "worse card" this module's failure contract promises.
 
-    So the call runs on a worker with a hard timeout, and the answer is cached per pid: a
-    process's command line never changes, so a viewer is asked once rather than once per
-    double-click. A hung WMI then costs one miss instead of a freeze.
+    So the call runs on a DAEMON thread with a hard timeout, and the answer is cached per pid:
+    a process's command line never changes, so a viewer is asked once rather than once per
+    double-click.
+
+    A daemon thread specifically, not a ``ThreadPoolExecutor``. Its workers are non-daemon and
+    ``concurrent.futures.thread`` registers an atexit hook that JOINS every one still running,
+    so ``shutdown(wait=False)`` frees the caller but not the process: quitting the clipper would
+    then block in finalisation until the hung COM call returned -- tray icon gone, process
+    alive, still holding the global hotkey, and a relaunch colliding with it. The same hang,
+    moved to the moment it looks least explicable.
+
+    Args:
+        pid: The process to ask about.
+        timeout: How long to wait. Defaults to :data:`_WMI_TIMEOUT_SECONDS`; the caller passes
+            what is left of its own budget so this cannot overrun the route that owns it.
 
     Never raises: WMI can be disabled, throttled, or refuse a process owned by another user, and
     all of those mean "no context", not "no capture".
@@ -147,25 +159,24 @@ def foreground_command_line(pid: int) -> str:
     if cached is not None:
         _COMMAND_LINE_CACHE.move_to_end(pid)
         return cached
+    limit = _WMI_TIMEOUT_SECONDS if timeout is None else max(0.0, timeout)
+    if limit <= 0:
+        return ""
     try:
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import TimeoutError as FutureTimeout
+        import queue
+        import threading
 
-        # NOT a `with` block. ThreadPoolExecutor's __exit__ joins its workers, so a timeout
-        # inside one would be undone by the wait on the way out and the caller would still
-        # sit for the full hang -- which is what this timeout exists to prevent. The pool is
-        # shut down without waiting instead, and an abandoned worker finishes in its own time.
-        pool = ThreadPoolExecutor(max_workers=1)
+        answers: queue.Queue[str] = queue.Queue(maxsize=1)
+        threading.Thread(
+            target=lambda: answers.put(_query_command_line(pid)),
+            daemon=True,
+        ).start()
         try:
-            future = pool.submit(_query_command_line, pid)
-            try:
-                answer = future.result(timeout=_WMI_TIMEOUT_SECONDS)
-            except FutureTimeout:
-                # Deliberately NOT cached: the service may be healthy again next time, and a
-                # cached "" would make one bad moment permanent for this process.
-                return ""
-        finally:
-            pool.shutdown(wait=False)
+            answer = answers.get(timeout=limit)
+        except queue.Empty:
+            # Deliberately NOT cached: the service may be healthy again next time, and a
+            # cached "" would make one bad moment permanent for this process.
+            return ""
     except Exception:
         return ""
     _COMMAND_LINE_CACHE[pid] = answer
@@ -174,7 +185,9 @@ def foreground_command_line(pid: int) -> str:
     return answer
 
 
-def open_pdf_for(pid: int, title: str) -> Optional[str]:
+def open_pdf_for(
+    pid: int, title: str, timeout: Optional[float] = None
+) -> Optional[str]:
     """The path of the PDF the foreground viewer has on screen, or ``None``.
 
     Composes the three steps so the caller has one thing to call and one thing to fail: the
@@ -184,5 +197,7 @@ def open_pdf_for(pid: int, title: str) -> Optional[str]:
     name = pdf_name_from_title(title)
     if not name:
         return None
-    path = pdf_path_from_command_line(foreground_command_line(pid), expected_name=name)
+    path = pdf_path_from_command_line(
+        foreground_command_line(pid, timeout), expected_name=name
+    )
     return path or None

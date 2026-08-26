@@ -714,7 +714,9 @@ class TestThePdfFallback:
         # the next one to touch frontmost_pid then passes or fails by collection order, with
         # the cause nowhere near the failure.
         monkeypatch.setattr(
-            windows_pdf, "open_pdf_for", lambda _pid, _title: str(document)
+            windows_pdf,
+            "open_pdf_for",
+            lambda _pid, _title, _timeout=None: str(document),
         )
         monkeypatch.setattr(platform_module, "frontmost_pid", lambda: pid)
         return provider
@@ -759,7 +761,9 @@ class TestThePdfFallback:
         import omnia_desktop_clipper.capture.windows_pdf as windows_pdf
 
         provider = self._provider(tmp_path, monkeypatch, ["Some text."])
-        monkeypatch.setattr(windows_pdf, "open_pdf_for", lambda _pid, _title: None)
+        monkeypatch.setattr(
+            windows_pdf, "open_pdf_for", lambda _pid, _title, _timeout=None: None
+        )
 
         assert provider._pdf_context("Some") == ""
 
@@ -780,7 +784,7 @@ class TestThePdfFallback:
         decoy.write_text("Some text here.", encoding="utf-8")
         provider = self._provider(tmp_path, monkeypatch, ["Some text here."])
         monkeypatch.setattr(
-            windows_pdf, "open_pdf_for", lambda _pid, _title: str(decoy)
+            windows_pdf, "open_pdf_for", lambda _pid, _title, _timeout=None: str(decoy)
         )
 
         assert provider._pdf_context("text") == ""
@@ -1290,3 +1294,119 @@ class TestTheWindowIsResolvedOnce:
         provider._pdf_context("mitochondrion")
 
         assert seen["window"] is window
+
+
+class TestTheWorkerDoesNotHoldTheProcessOpen:
+    """A ThreadPoolExecutor would, which is why this uses a bare daemon thread.
+
+    `concurrent.futures.thread` registers an atexit hook that JOINS every worker still running,
+    and its workers are non-daemon -- so `shutdown(wait=False)` frees the caller but not the
+    process. Quitting the clipper would block in finalisation until the hung COM call returned:
+    tray icon gone, process alive, still holding the global hotkey, and a relaunch colliding
+    with it. The same hang, moved to the moment it looks least explicable.
+    """
+
+    def test_the_worker_is_a_daemon(self, monkeypatch) -> None:
+        import threading
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+        started: list = []
+        real_thread = threading.Thread
+
+        def recording(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            started.append(thread)
+            return thread
+
+        monkeypatch.setattr(threading, "Thread", recording)
+        monkeypatch.setattr(module, "_query_command_line", lambda _pid: "cmd")
+
+        module.foreground_command_line(4242)
+
+        assert started, "no worker was started"
+        assert all(t.daemon for t in started), (
+            "a non-daemon worker is joined at interpreter exit, so a hung WMI call would keep "
+            "the process alive after the user quits"
+        )
+
+    def test_a_zero_or_negative_budget_asks_nothing(self, monkeypatch) -> None:
+        """The caller passes what is left of its deadline; nothing left means no call."""
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+        asked = {"n": 0}
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: asked.update(n=1) or "cmd"
+        )
+
+        assert module.foreground_command_line(4242, timeout=0.0) == ""
+        assert asked["n"] == 0
+
+    def test_the_callers_budget_is_used_as_the_timeout(self, monkeypatch) -> None:
+        """A fixed constant LARGER than the route's budget made its docstring untrue."""
+        import time
+
+        import omnia_desktop_clipper.capture.windows_pdf as module
+
+        module._COMMAND_LINE_CACHE.clear()
+        monkeypatch.setattr(
+            module, "_query_command_line", lambda _pid: time.sleep(5) or "x"
+        )
+
+        started = time.monotonic()
+        assert module.foreground_command_line(4242, timeout=0.05) == ""
+        assert time.monotonic() - started < 1.0
+
+
+class TestADamagedDocumentIsNotReparsedEveryCapture:
+    """`PdfTextReader.document` cached only successes.
+
+    A partial download or a scanner-made file with a broken startxref sends pypdf into
+    rebuilding the xref table, which reads the whole file in Python looking for object markers
+    -- seconds of CPU on a large scan, on the Qt main thread. Caching only successes meant
+    paying that again on every capture for as long as the document stayed open.
+    """
+
+    def test_a_failure_is_parsed_once_per_mtime(self, tmp_path) -> None:
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        document = tmp_path / "broken.pdf"
+        document.write_bytes(bytes.fromhex("255044462d312e340a"))
+        attempts = {"n": 0}
+
+        class _Failing(_FakeEngine):
+            def open(self, path):
+                attempts["n"] += 1
+                return None
+
+        reader = PdfTextReader(_Failing([]))
+
+        for _ in range(5):
+            assert reader.page_texts(str(document), 1) == []
+        assert (
+            attempts["n"] == 1
+        ), f"the broken document was parsed {attempts['n']} times"
+
+    def test_an_edited_document_is_read_again(self, tmp_path) -> None:
+        """The cache keys on mtime, so a file that changes is not written off for ever."""
+        import os
+
+        from omnia_desktop_clipper.capture.pdf_context import PdfTextReader
+
+        document = tmp_path / "fixed.pdf"
+        document.write_bytes(bytes.fromhex("255044462d312e340a"))
+        attempts = {"n": 0}
+
+        class _Counting(_FakeEngine):
+            def open(self, path):
+                attempts["n"] += 1
+                return super().open(path)
+
+        reader = PdfTextReader(_Counting(["The word is here."]))
+        reader.page_texts(str(document), 1)
+        os.utime(str(document), (0, 0))
+        reader.page_texts(str(document), 1)
+
+        assert attempts["n"] == 2

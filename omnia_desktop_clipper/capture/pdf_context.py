@@ -227,11 +227,14 @@ class PdfTextReader:
             stamp = os.path.getmtime(path)
         except OSError:
             return None
-        if self._document is not None and self._path == path and self._stamp == stamp:
+        if self._path == path and self._stamp == stamp:
+            # Hits for a FAILURE too. A damaged PDF -- a partial download, or a scanner-made
+            # file with a broken startxref -- sends pypdf into rebuilding the xref table, which
+            # reads the whole file in Python looking for object markers: seconds of CPU on a
+            # large scan, on the Qt main thread. Caching only successes meant paying that on
+            # every capture for as long as the document stayed open.
             return self._document
         document = self._engine.open(path)
-        if document is None:
-            return None
         self._path, self._stamp, self._document = path, stamp, document
         return document
 
