@@ -91,3 +91,114 @@ class TestLookup:
             base_url="http://h:1/", transport=lambda url: seen.append(url) or {"cards": []}
         ).lookup("w")
         assert seen[0].startswith("http://h:1/lookup?")
+
+
+class TestFetchingMediaFromOmnia:
+    """Images used to be fetched through AnkiConnect, a SEPARATE add-on.
+
+    That is the whole bug: on a machine without it, every image in the lookup panel read
+    "Image unavailable" while the panel around it worked perfectly -- because the panel comes
+    from omnia's own service on 8766 and the image came from something on 8765 that was not
+    installed. Measured on the reporting machine: 8766 listening, 8765 answered by nobody.
+    Anything the lookup can answer, the media can.
+    """
+
+    @staticmethod
+    def _serving(handler):
+        """A real loopback HTTP server, because this path is raw bytes, not the JSON transport."""
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # stdlib spells it this way
+                handler(self)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_the_bytes_come_back_verbatim(self) -> None:
+        payload = bytes.fromhex("89504e470d0a1a0a") + b"pretend png"
+
+        def respond(request):
+            request.send_response(200)
+            request.send_header("Content-Type", "image/png")
+            request.send_header("Content-Length", str(len(payload)))
+            request.end_headers()
+            request.wfile.write(payload)
+
+        server = self._serving(respond)
+        try:
+            client = LookupClient(f"http://127.0.0.1:{server.server_port}")
+            assert client.media("picture.png") == payload
+        finally:
+            server.shutdown()
+
+    def test_the_filename_is_escaped_not_pasted(self) -> None:
+        """Anki filenames carry spaces, '&' and non-ASCII; raw they would corrupt the query."""
+        seen = {}
+
+        def respond(request):
+            seen["path"] = request.path
+            request.send_response(200)
+            request.send_header("Content-Length", "1")
+            request.end_headers()
+            request.wfile.write(b"x")
+
+        server = self._serving(respond)
+        try:
+            client = LookupClient(f"http://127.0.0.1:{server.server_port}")
+            client.media("a b&c=d é.png")
+        finally:
+            server.shutdown()
+
+        assert " " not in seen["path"]
+        assert seen["path"].count("&") == 0, f"a bare '&' split the query: {seen['path']}"
+        assert seen["path"].startswith("/media?file=")
+
+    def test_a_404_is_none_not_an_exception(self) -> None:
+        """A missing file must fall through to the fallback, not kill the worker thread."""
+
+        def respond(request):
+            request.send_response(404)
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+
+        server = self._serving(respond)
+        try:
+            client = LookupClient(f"http://127.0.0.1:{server.server_port}")
+            assert client.media("absent.png") is None
+        finally:
+            server.shutdown()
+
+    def test_a_dead_service_is_none_not_an_exception(self) -> None:
+        """Anki closed. The panel shows a reason; it does not crash the clipper."""
+        import socket
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            dead = probe.getsockname()[1]
+
+        assert LookupClient(f"http://127.0.0.1:{dead}").media("picture.png") is None
+
+    def test_no_filename_asks_nothing(self) -> None:
+        """A note with an empty image field must not produce a request at all."""
+        asked = {"n": 0}
+
+        def respond(request):
+            asked["n"] += 1
+            request.send_response(200)
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+
+        server = self._serving(respond)
+        try:
+            client = LookupClient(f"http://127.0.0.1:{server.server_port}")
+            assert client.media("") is None
+        finally:
+            server.shutdown()
+
+        assert asked["n"] == 0

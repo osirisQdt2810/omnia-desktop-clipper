@@ -489,8 +489,16 @@ class LookupPanel(QWidget):
         button.setText("…")
 
         def ready(data: object) -> None:
-            ok = isinstance(data, (bytes, bytearray)) and play_bytes(bytes(data), filename)
+            fetched = isinstance(data, (bytes, bytearray)) and bool(data)
+            ok = fetched and play_bytes(bytes(data), filename)
             button.setText(original if ok else "unavailable")
+            if not ok:
+                # A button is too narrow for the reason, so it goes where there is room.
+                button.setToolTip(
+                    "The audio could not be played on this system."
+                    if fetched
+                    else f"Anki did not return {filename}."
+                )
             button.setEnabled(True)
 
         self._request_media(filename, ready)
@@ -535,7 +543,14 @@ class LookupPanel(QWidget):
 
     @staticmethod
     def _place_image(layout: QVBoxLayout, data: object) -> None:
-        """Render fetched bytes as a bounded thumbnail (or say the image is unavailable)."""
+        """Render fetched bytes as a bounded thumbnail, or say WHY there is no thumbnail.
+
+        The two failures need telling apart. No bytes means the fetch itself failed -- the file
+        is missing from the collection, or the media route is not answering -- and the user can
+        do something about that. Bytes that will not decode mean the file arrived but Qt has no
+        plugin for its format, which is a different problem with a different fix. A single
+        "Image unavailable" for both is what sent this bug to me as "it just says unavailable".
+        """
         label = QLabel()
         pixmap = QPixmap()
         if isinstance(data, (bytes, bytearray)) and pixmap.loadFromData(bytes(data)):
@@ -548,8 +563,11 @@ class LookupPanel(QWidget):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+        elif isinstance(data, (bytes, bytearray)) and data:
+            label.setText("Image format not supported")
+            label.setObjectName("lookupSubtitle")
         else:
-            label.setText("Image unavailable")
+            label.setText("Image not found in Anki")
             label.setObjectName("lookupSubtitle")
         layout.addWidget(label)
 

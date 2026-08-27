@@ -486,14 +486,26 @@ class ClipperApp(QObject):
         The lookup panel needs the bytes to build a QPixmap, which is main-thread-only, so the
         HTTP round-trip runs on a throwaway thread and the result returns through a queued
         signal. A failure delivers ``None``, which the panel renders as "Image unavailable".
+
+        OMNIA FIRST, AnkiConnect second. This used to go straight to AnkiConnect, which is a
+        separate add-on the user may simply not have installed -- and then every image in the
+        panel read "Image unavailable" while the panel itself worked perfectly, because the
+        panel comes from omnia's own service and the image did not. Omnia serves the file now;
+        AnkiConnect stays as the fallback for an older omnia that has no /media route.
         """
         import threading
 
         def work() -> None:
+            data = None
             try:
-                data = self._client.retrieve_media_file(filename)
+                data = self._lookup.media(filename)
             except Exception:
                 data = None
+            if data is None:
+                try:
+                    data = self._client.retrieve_media_file(filename)
+                except Exception:
+                    data = None
             self._media_ready.emit(on_ready, data)
 
         threading.Thread(target=work, name="omnia-media", daemon=True).start()

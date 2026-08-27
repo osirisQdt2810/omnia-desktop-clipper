@@ -113,6 +113,32 @@ class LookupClient:
         self._base_url = base_url.rstrip("/")
         self._transport = transport if transport is not None else _urllib_transport
 
+    def media(self, filename: str) -> bytes | None:
+        """Return a collection-media file's bytes from omnia, or ``None``.
+
+        Omnia's own lookup service serves this. It used to come from AnkiConnect, which is a
+        SEPARATE add-on: on a machine without it every image in this panel read "Image
+        unavailable" while the panel itself worked, because the panel is this service and the
+        image was not. Anything the lookup can answer, the media can.
+
+        Raw bytes, so this does not go through the JSON transport. Never raises -- a failure
+        means the caller falls back, and then shows a badge.
+        """
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        if not filename:
+            return None
+        url = f"{self._base_url}/media?file={urllib.parse.quote(filename)}"
+        try:
+            with urllib.request.urlopen(url, timeout=_TIMEOUT_SECONDS) as response:
+                if response.status != 200:
+                    return None
+                return bytes(response.read())
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
     def lookup(self, word: str) -> LookupView:
         """Look ``word`` up; raise :class:`LookupUnavailableError` if the service can't answer.
 
