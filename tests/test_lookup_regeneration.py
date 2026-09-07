@@ -10,6 +10,8 @@ from __future__ import annotations
 from omnia_desktop_clipper.lookup.client import LookupFieldView
 from omnia_desktop_clipper.lookup.generate import FieldGeneration, GenerateOutcome
 from omnia_desktop_clipper.lookup.regeneration import (
+    REGEN_OFF_HINT,
+    REGEN_UNAVAILABLE_HINT,
     GENERATE_GLYPH,
     NO_ANSWER,
     SPIN_FRAMES,
@@ -361,3 +363,30 @@ class TestTwoRequestsOnOneNote:
         state.fail(_NOTE, "Anki is not running.")
 
         assert state.running(_NOTE) == set()
+
+
+class TestWhyItIsRefused:
+    """``can_regenerate: false`` has two causes; only one names a control the user can reach.
+
+    With Smart Notes disabled the "Regenerate from clippers" checkbox is not on screen to be
+    ticked, so pointing at it is a dead end dressed as a remedy. omnia says which it is.
+    """
+
+    def _refused(self, reason: str) -> RegenerationState:
+        state = RegenerationState()
+        state.reset(allowed=False, reason=reason)
+        return state
+
+    def test_smart_notes_being_off_names_smart_notes(self):
+        state = self._refused("unavailable")
+        assert state.refusal == REGEN_UNAVAILABLE_HINT
+        control = state.field_control(_NOTE, LookupFieldView("Definition", ""))
+        assert "Regenerate from clippers" not in control.tooltip
+
+    def test_the_checkbox_being_off_names_the_checkbox(self):
+        state = self._refused("off")
+        assert state.refusal == REGEN_OFF_HINT
+        assert "Regenerate from clippers" in state.note_control(_NOTE).tooltip
+
+    def test_an_older_omnia_that_sends_no_reason_still_names_a_real_control(self):
+        assert self._refused("").refusal == REGEN_OFF_HINT

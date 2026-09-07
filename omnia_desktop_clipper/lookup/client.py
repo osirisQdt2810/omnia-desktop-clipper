@@ -87,6 +87,11 @@ class LookupView:
     # clippers" option). Defaults to False: an omnia too old to answer the question has no
     # /generate route either, so offering an enabled button would only produce a failure.
     can_regenerate: bool = False
+    # WHY it will not, when it will not: ``"off"`` (the checkbox), ``"unavailable"`` (Smart
+    # Notes itself is disabled, so that checkbox is not on screen to be ticked), or ``""``.
+    # The two need different sentences — one of them names a control the user cannot reach —
+    # and an omnia too old to say which leaves this empty.
+    regenerate_reason: str = ""
 
     @property
     def found(self) -> bool:
@@ -216,4 +221,5 @@ class LookupClient:
             cards=cards,
             truncated=bool(payload.get("truncated")),
             can_regenerate=bool(payload.get("can_regenerate")),
+            regenerate_reason=str(payload.get("regenerate_reason") or ""),
         )
