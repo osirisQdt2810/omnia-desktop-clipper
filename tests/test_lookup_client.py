@@ -53,6 +53,17 @@ class TestLookup:
         assert seen[0].startswith("http://127.0.0.1:9999/lookup?word=")
         assert "lao+xu%E1%BB%91ng" in seen[0] or "lao%20xu%E1%BB%91ng" in seen[0]
 
+    def test_the_request_says_who_is_asking(self):
+        """omnia answers a named client with more: the per-field generation state, and whether
+        regenerating is allowed at all. Drop the parameter and the panel gets the older, thinner
+        answer — every generate button disabled, with no way to tell why."""
+        seen: list[str] = []
+        LookupClient(
+            transport=lambda url: seen.append(url) or {"cards": []}
+        ).lookup("plunge")
+
+        assert "client=desktop_clipper" in seen[0]
+
     def test_a_miss_is_not_an_error(self):
         # "not in the collection" is a successful lookup with no cards, NOT an exception.
         view = LookupClient(transport=lambda url: {"word": "x", "cards": []}).lookup("x")
@@ -91,6 +102,74 @@ class TestLookup:
             base_url="http://h:1/", transport=lambda url: seen.append(url) or {"cards": []}
         ).lookup("w")
         assert seen[0].startswith("http://h:1/lookup?")
+
+
+class TestTheRegenerationContract:
+    """What the richer answer adds: empty fields, their state, and the master switch.
+
+    An older omnia sends none of it. The defaults are chosen so that build still WORKS: no
+    ``can_regenerate`` means the controls stay disabled (there is no ``/generate`` route to
+    call), while a field with no ``state`` is assumed generatable so the service — not a guess
+    made here — gets to say otherwise.
+    """
+
+    def test_a_field_with_no_content_is_kept(self) -> None:
+        """The empty ones are exactly the rows worth acting on; dropping them hid the feature."""
+        payload = {
+            "can_regenerate": True,
+            "cards": [
+                {
+                    "note_id": 1,
+                    "fields": [
+                        {"name": "Definition", "text": "", "empty": True, "state": "ready"}
+                    ],
+                }
+            ],
+        }
+
+        view = LookupClient(transport=lambda url: payload).lookup("x")
+
+        field = view.cards[0].fields[0]
+        assert field.name == "Definition" and field.text == ""
+        assert field.empty is True and field.state == "ready"
+
+    def test_is_empty_covers_the_media_only_field(self) -> None:
+        """No text, but a clip: that field is not empty and must not offer to be "generated"."""
+        payload = {
+            "cards": [
+                {
+                    "fields": [
+                        {"name": "Audio", "text": "", "audio": ["w.mp3"]},
+                        {"name": "Blank", "text": ""},
+                    ]
+                }
+            ]
+        }
+
+        fields = LookupClient(transport=lambda url: payload).lookup("x").cards[0].fields
+
+        assert fields[0].is_empty is False
+        assert fields[1].is_empty is True
+
+    def test_can_regenerate_is_carried(self) -> None:
+        view = LookupClient(
+            transport=lambda url: {"cards": [{"title": "a"}], "can_regenerate": True}
+        ).lookup("a")
+
+        assert view.can_regenerate is True
+
+    def test_an_older_service_reads_as_regeneration_unavailable(self) -> None:
+        """No key at all: there is no /generate route either, so the controls stay off."""
+        view = LookupClient(transport=lambda url: {"cards": [{"title": "a"}]}).lookup("a")
+
+        assert view.can_regenerate is False
+
+    def test_a_field_state_defaults_to_ready(self) -> None:
+        view = LookupClient(
+            transport=lambda url: {"cards": [{"fields": [{"name": "F", "text": "t"}]}]}
+        ).lookup("a")
+
+        assert view.cards[0].fields[0].state == "ready"
 
 
 class TestFetchingMediaFromOmnia:

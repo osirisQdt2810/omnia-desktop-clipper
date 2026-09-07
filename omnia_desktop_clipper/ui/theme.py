@@ -211,6 +211,18 @@ def stylesheet(colors: Palette) -> str:
         font-size: 12px;
     }}
     QPushButton#lookupAction:hover {{ border-color: {colors.accent}; color: {colors.accent}; }}
+    QPushButton#lookupAction:disabled {{ color: {_rgba(colors.muted_rgb, 0.45)}; }}
+    QPushButton#fieldGenerate {{
+        background: transparent;
+        color: {colors.muted};
+        border: 1px solid {colors.border};
+        border-radius: 6px;
+        padding: 1px 6px;
+        font-size: 12px;
+    }}
+    QPushButton#fieldGenerate:hover {{ color: {colors.accent}; border-color: {colors.accent}; }}
+    QPushButton#fieldGenerate:disabled {{ color: {_rgba(colors.muted_rgb, 0.45)}; }}
+    #fieldStatus {{ font-size: 11px; color: {colors.muted}; font-style: italic; }}
     QLineEdit#lookupSearch {{
         background: {colors.surface};
         color: {colors.text};

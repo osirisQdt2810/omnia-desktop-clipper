@@ -105,9 +105,22 @@ class SettingsDialog(QDialog):
             "Where the Omnia add-on's lookup service listens (loopback only). Change this only "
             "if you changed the port in Anki → Omnia → Word Lookup."
         )
-        # The URL is only meaningful while the lookup is on.
+        self._lookup_token_edit = QLineEdit(config.lookup_token)
+        self._lookup_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._lookup_token_edit.setPlaceholderText("found automatically — leave empty")
+        self._lookup_token_edit.setToolTip(
+            "Authorises regenerating a note's fields from the lookup panel (it rewrites the "
+            "note and spends your LLM/TTS credits).\n"
+            "Normally left EMPTY: the clipper reads the token Omnia writes into its add-on "
+            "folder (user_files/clippers/lookup-token.txt).\n"
+            "Fill it in only if your Anki data lives somewhere unusual and regenerating says "
+            "the token could not be found."
+        )
+        # The URL and token are only meaningful while the lookup is on.
         self._lookup_check.toggled.connect(self._lookup_url_edit.setEnabled)
+        self._lookup_check.toggled.connect(self._lookup_token_edit.setEnabled)
         self._lookup_url_edit.setEnabled(config.lookup_enabled)
+        self._lookup_token_edit.setEnabled(config.lookup_enabled)
 
         self._populate_decks_and_models()
         self._populate_fields(self._model_combo.currentText())
@@ -131,6 +144,7 @@ class SettingsDialog(QDialog):
         form.addRow(self._skip_browsers_check)
         form.addRow(self._lookup_check)
         form.addRow("Lookup service URL", self._lookup_url_edit)
+        form.addRow("Lookup token", self._lookup_token_edit)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -224,4 +238,5 @@ class SettingsDialog(QDialog):
             skip_in_browsers=self._skip_browsers_check.isChecked(),
             lookup_enabled=self._lookup_check.isChecked(),
             lookup_url=self._lookup_url_edit.text().strip(),
+            lookup_token=self._lookup_token_edit.text().strip(),
         )
