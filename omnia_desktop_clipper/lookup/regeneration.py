@@ -33,6 +33,13 @@ REGEN_OFF_HINT = (
     "Turn on Smart Notes → “Regenerate from clippers” to allow it "
     "(and update Omnia if you don't see that option)."
 )
+# The OTHER reason regeneration can be refused, and why the payload carries a reason at all:
+# with Smart Notes disabled the checkbox above is not on screen to be ticked, so naming it
+# would be a dead end dressed as a remedy.
+REGEN_UNAVAILABLE_HINT = (
+    "Regenerating needs Smart Notes.\nSwitch it on in Anki: Tools → Omnia."
+)
+REASON_UNAVAILABLE = "unavailable"
 NO_ANSWER = "Omnia did not answer for this field."
 
 _ALL_HINT = (
@@ -58,9 +65,10 @@ class RegenerationState:
     answer that arrives then belongs to the note it named — not to whatever is on screen.
     """
 
-    def __init__(self, allowed: bool = False) -> None:
+    def __init__(self, allowed: bool = False, reason: str = "") -> None:
         """Start with regeneration disallowed, which is what an answerless panel shows."""
         self._allowed = allowed
+        self._reason = reason
         # note id -> {field name: was it named EXPLICITLY by the user}. The flag decides
         # whether "omnia never mentioned this field" is worth saying: see `finish`.
         self._running: dict[int, dict[str, bool]] = {}
@@ -71,9 +79,21 @@ class RegenerationState:
         """Whether omnia will accept a regeneration for the result on screen."""
         return self._allowed
 
-    def reset(self, allowed: bool) -> None:
+    @property
+    def refusal(self) -> str:
+        """The sentence to show when regeneration is refused — naming a real remedy.
+
+        An omnia too old to send a reason falls back to the checkbox: it names a control that
+        exists, and a user who cannot find it has still been told the feature is a switch.
+        """
+        if self._reason == REASON_UNAVAILABLE:
+            return REGEN_UNAVAILABLE_HINT
+        return REGEN_OFF_HINT
+
+    def reset(self, allowed: bool, reason: str = "") -> None:
         """Adopt a new lookup result: new notes, and nothing of the old one's worth keeping."""
         self._allowed = allowed
+        self._reason = reason
         self._running.clear()
         self._messages.clear()
 
@@ -199,7 +219,7 @@ class RegenerationState:
         refuse — and then the tooltip names the setting to turn on.
         """
         if not self._allowed:
-            return ControlState(False, GENERATE_GLYPH, REGEN_OFF_HINT)
+            return ControlState(False, GENERATE_GLYPH, self.refusal)
         if field.name in self.running(note_id):
             return ControlState(False, spinner, f"Generating {field.name}…")
         verb = "Generate" if field.is_empty else "Regenerate"
@@ -211,7 +231,7 @@ class RegenerationState:
     def note_control(self, note_id: int, spinner: str = SPIN_FRAMES[0]) -> ControlState:
         """How to draw "Generate all" for the note on screen."""
         if not self._allowed:
-            return ControlState(False, REGENERATE_ALL, REGEN_OFF_HINT)
+            return ControlState(False, REGENERATE_ALL, self.refusal)
         if self.busy(note_id):
             return ControlState(False, f"{spinner} {RUNNING}", "Generating this note…")
         return ControlState(True, REGENERATE_ALL, _ALL_HINT)

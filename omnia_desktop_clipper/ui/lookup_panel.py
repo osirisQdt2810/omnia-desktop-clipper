@@ -234,7 +234,7 @@ class LookupPanel(QWidget):
         self._position = position
         # A new lookup is a new set of notes; the service has already dropped any regeneration
         # still in flight for the old ones, so their spinners and reasons go with them.
-        self._regen.reset(view.can_regenerate)
+        self._regen.reset(view.can_regenerate, view.regenerate_reason)
         self._sync_spinner()
         if not view.found:
             self._render_not_found(view.word)
