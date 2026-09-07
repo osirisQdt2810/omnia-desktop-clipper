@@ -185,6 +185,31 @@ class TestLookupSettings:
         assert Config.from_dict(original.to_dict()) == original
 
 
+class TestLookupToken:
+    """The manual override for the token that authorises regenerating a note.
+
+    Normally empty — the clipper finds the token in Omnia's add-on folder. The setting exists
+    for the machines where discovery cannot work, and on those it is the ONLY way to use the
+    feature, so it had better survive a save/load: a field added to the dataclass and not to
+    ``from_dict`` appears to save and then silently reverts.
+    """
+
+    def test_it_defaults_to_empty_so_discovery_runs(self) -> None:
+        assert Config().lookup_token == ""
+
+    def test_it_round_trips(self, tmp_path) -> None:
+        path = tmp_path / "config.json"
+        save(Config(lookup_token="pasted-by-hand"), path)
+
+        assert load(path).lookup_token == "pasted-by-hand"
+
+    def test_a_config_saved_before_this_option_existed_still_loads(self) -> None:
+        stored = Config().to_dict()
+        del stored["lookup_token"]
+
+        assert Config.from_dict(stored).lookup_token == ""
+
+
 class TestBrowserSkip:
     def test_defaults_to_standing_aside_in_browsers(self) -> None:
         assert Config().skip_in_browsers is True

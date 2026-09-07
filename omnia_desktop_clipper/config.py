@@ -103,6 +103,11 @@ class Config:
     # searchable and which fields are worth showing); this URL is where that plugin listens.
     lookup_enabled: bool = True
     lookup_url: str = "http://127.0.0.1:8766"
+    # Regenerating a note from the lookup panel rewrites it and spends LLM/TTS credits, so it is
+    # authenticated with a token omnia writes into its add-on data. It is found automatically
+    # (see lookup/token.py); this override exists for an unusual Anki layout or a token copied
+    # by hand, and an explicit value always wins.
+    lookup_token: str = ""
     # Add the captured note straight away instead of opening the confirm popup. ON by default:
     # the capture gesture (a hotkey, or clicking the "+") is already a deliberate act, so a
     # dialog whose only content is what you just selected asks you to confirm a decision you
@@ -163,6 +168,7 @@ class Config:
             enabled=_as_bool(data.get("enabled"), base.enabled),
             lookup_enabled=_as_bool(data.get("lookup_enabled"), base.lookup_enabled),
             lookup_url=_as_str(data.get("lookup_url"), base.lookup_url),
+            lookup_token=_as_str(data.get("lookup_token"), base.lookup_token),
             skip_in_browsers=_as_bool(data.get("skip_in_browsers"), base.skip_in_browsers),
         )
 

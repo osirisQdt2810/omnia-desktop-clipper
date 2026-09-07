@@ -10,17 +10,23 @@ Design notes (the parts that are decisions, not taste):
   rendered; a wrong guess about importance costs a scroll, never data.
 * **State first.** The scheduling pill (new / learning / review + interval, reps, lapses) is the
   answer to "do I already know this?", so it sits next to the word rather than buried below.
+* **Readable AND fixable.** Every field carries a generate button, and the note carries a
+  "Generate all", so the answer to an empty or stale field is here rather than "open Anki and
+  find the note". A field omnia cannot generate keeps its button: clicking it fetches the
+  reason, which is the thing worth knowing.
 
-Rendering only — every decision about *what* to show is made by omnia's word-lookup plugin and
-arrives display-ready (see :mod:`omnia_desktop_clipper.lookup.client`).
+Rendering only — every decision about *what* to show, and about what may be generated, is made
+by omnia's word-lookup plugin and arrives display-ready (see
+:mod:`omnia_desktop_clipper.lookup.client`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Optional
 
-from PyQt6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, Qt
+from PyQt6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, Qt, QTimer
 from PyQt6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractScrollArea,
@@ -33,7 +39,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..lookup.client import LookupCardView, LookupView
+from ..lookup.client import LookupCardView, LookupFieldView, LookupView
+from ..lookup.generate import GenerateOutcome
+from ..lookup.regeneration import SPIN_FRAMES, RegenerationState
 from . import theme
 from .audio import play_bytes
 from .flow_layout import flow_widget
@@ -49,6 +57,24 @@ _FADE_HEIGHT = 26  # px of gradient at the bottom of a scrolling field list
 _CAPTION_GAP = 7  # px between a field's caption and its value
 _IMAGE_MAX_WIDTH = 360
 _IMAGE_MAX_HEIGHT = 260
+
+# The spinner's pace and the generate button's width. What those controls SAY, and whether
+# they can be pressed, is decided in lookup/regeneration.py — this file only draws it.
+_SPIN_MS = 220
+_GENERATE_WIDTH = 28  # px; a fixed width keeps the glyph and the spinner frames aligned
+
+
+@dataclass
+class _FieldRow:
+    """One field's row: the widget in the list, and the button that regenerates it.
+
+    Held on to because a generate answer arrives tens of seconds later, into a panel the user
+    is still reading. Replacing THAT row leaves the scroll position, the other rows, and any
+    field still spinning exactly as they were — which rebuilding the panel would not.
+    """
+
+    widget: QWidget
+    button: Optional[QPushButton] = None
 
 
 def _state_pill(state: str, colors: theme.Palette) -> QLabel:
@@ -92,6 +118,7 @@ class LookupPanel(QWidget):
         on_add: Optional[Callable[[], None]] = None,
         on_open_in_anki: Optional[Callable[[int], None]] = None,
         request_media: Optional[Callable[[str, Callable[[object], None]], None]] = None,
+        on_generate: Optional[Callable[[int, Optional[list[str]]], None]] = None,
     ) -> None:
         """Build the (reusable, singleton) panel.
 
@@ -100,6 +127,11 @@ class LookupPanel(QWidget):
             on_open_in_anki: Called with a note id to reveal it in Anki's browser.
             request_media: ``(filename, on_ready)`` fetching a media file OFF the UI thread and
                 calling ``on_ready(bytes | None)`` back on it. ``None`` disables image viewing.
+            on_generate: ``(note_id, field_names | None)`` asking omnia to regenerate those
+                fields (``None`` = the whole note), OFF the UI thread. The answer comes back
+                through :meth:`apply_generation` / :meth:`report_generation_failure`, not
+                through a callback, because one request can answer about many fields at once.
+                ``None`` hides the generate controls entirely.
         """
         super().__init__(
             None,
@@ -110,7 +142,22 @@ class LookupPanel(QWidget):
         self._on_add = on_add
         self._on_open_in_anki = on_open_in_anki
         self._request_media = request_media
+        self._on_generate = on_generate
         self._word = ""
+        # What may be regenerated, what is running, and what omnia said about the rest. Kept in
+        # a Qt-free object so those rules are testable without a QApplication.
+        self._regen = RegenerationState()
+        # Handles into the rendered field list, so one arriving field can be redrawn alone.
+        self._field_rows: dict[str, _FieldRow] = {}
+        self._fields_layout: Optional[QVBoxLayout] = None
+        self._generate_all: Optional[QPushButton] = None
+        # ONE timer drives every spinner on screen. A timer per row would have to be started,
+        # stopped and destroyed with each row — which is exactly where such things get left
+        # running after the widget they were animating is gone.
+        self._spin_frame = 0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(_SPIN_MS)
+        self._spin_timer.timeout.connect(self._tick_spinner)
         # The whole result plus which of its notes is on screen, so the switcher can re-render
         # a different note without asking omnia again.
         # Set when a scrolling field list is built; repositions its bottom gradient.
@@ -166,6 +213,10 @@ class LookupPanel(QWidget):
     def show_loading(self, word: str, position: tuple[int, int]) -> None:
         """Show the panel immediately in a loading state, so the click feels instant."""
         self._word = word
+        # A new lookup discards any regeneration still in flight (the service drops its answer),
+        # so let the spinner stop here rather than tick on for a note that has left the screen.
+        self._regen.reset(allowed=False)
+        self._sync_spinner()
         self._render_message(f"Looking up “{word}”…", "Searching your collection.")
         self._present(position)
 
@@ -181,6 +232,10 @@ class LookupPanel(QWidget):
         self._view = view
         self._index = 0
         self._position = position
+        # A new lookup is a new set of notes; the service has already dropped any regeneration
+        # still in flight for the old ones, so their spinners and reasons go with them.
+        self._regen.reset(view.can_regenerate)
+        self._sync_spinner()
         if not view.found:
             self._render_not_found(view.word)
         else:
@@ -198,9 +253,14 @@ class LookupPanel(QWidget):
     # -- rendering -----------------------------------------------------------------------
 
     def _clear(self) -> theme.Palette:
+        """Install a fresh content widget, re-apply the appearance, and return its palette."""
         # The old content owns the previous fade; drop the handle with it.
         self._reposition_fade = None
-        """Install a fresh content widget, re-apply the appearance, and return its palette."""
+        # Same for the field rows and the footer button: they are about to be destroyed, and a
+        # handle to a deleted widget is how a late generate answer becomes a crash.
+        self._field_rows = {}
+        self._fields_layout = None
+        self._generate_all = None
         if self._content is not None:
             self._shell.removeWidget(self._content)
             # setParent(None) detaches it NOW; deleteLater alone would leave a child whose
@@ -262,17 +322,44 @@ class LookupPanel(QWidget):
             self._body.addWidget(self._switcher(view, index, colors))
         self._body.addWidget(self._fields_area(card), 1)
 
+        actions = self._action_row(card)
+        if actions is not None:
+            self._body.addWidget(actions)
+
+    def _action_row(self, card: LookupCardView) -> Optional[QWidget]:
+        """The footer: regenerate the whole note on the left, open it in Anki on the right."""
+        if self._on_generate is None and self._on_open_in_anki is None:
+            return None
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        if self._on_generate is not None:
+            self._generate_all = self._generate_all_button(card)
+            self._sync_generate_all(card)
+            row.addWidget(self._generate_all)
+        row.addStretch(1)
         if self._on_open_in_anki is not None:
-            row = QHBoxLayout()
-            row.addStretch(1)
             button = QPushButton("Open in Anki")
             button.setObjectName("lookupAction")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda: self._handle_open(card.note_id))
             row.addWidget(button)
-            holder = QWidget()
-            holder.setLayout(row)
-            self._body.addWidget(holder)
+        holder = QWidget()
+        holder.setLayout(row)
+        return holder
+
+    def _generate_all_button(self, card: LookupCardView) -> QPushButton:
+        """The footer's "Generate all": every field of the shown note, whatever its state.
+
+        It runs to completion — a field that cannot be generated reports its reason and the
+        rest still run — because the request names the note, not a field, and omnia answers
+        about each field separately. :meth:`_sync_generate_all` fills in the label, tooltip and
+        enabled state, here and on every later change.
+        """
+        button = QPushButton()
+        button.setObjectName("lookupAction")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda: self._start_generation(card.note_id, None))
+        return button
 
     def _header_band(
         self, card: LookupCardView, view: LookupView, colors: theme.Palette
@@ -370,13 +457,22 @@ class LookupPanel(QWidget):
         return line
 
     def _fields_area(self, card: LookupCardView) -> QScrollArea:
-        """The scrollable field list — everything omnia sent, in its chosen order."""
+        """The scrollable field list — everything omnia sent, in its chosen order.
+
+        "Everything" now includes the fields that are EMPTY. They used to be left out, which
+        hid precisely the rows worth acting on: a field nobody ever filled is the first thing
+        the user wants to generate, and it cannot be asked for if it is not on screen.
+        """
         inner = QWidget()
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(9)
+        self._fields_layout = layout
+        self._field_rows = {}
         for field in card.fields:
-            layout.addWidget(self._field_block(field))
+            row = self._field_block(card, field)
+            self._field_rows[field.name] = row
+            layout.addWidget(row.widget)
 
         area = QScrollArea()
         area.setWidget(inner)
@@ -422,8 +518,8 @@ class LookupPanel(QWidget):
         area.verticalScrollBar().rangeChanged.connect(reposition)
         self._reposition_fade = reposition
 
-    def _field_block(self, field) -> QWidget:
-        """One field: its name as a small caps label above the value (or a media badge)."""
+    def _field_block(self, card: LookupCardView, field: LookupFieldView) -> _FieldRow:
+        """One field: its name and generate button, the value (or a media badge), any status."""
         holder = QFrame()
         holder.setObjectName("fieldCard")
         layout = QVBoxLayout(holder)
@@ -431,9 +527,15 @@ class LookupPanel(QWidget):
         # The caption and its value need visible air between them; sitting nearly flush made the
         # pair read as one block.
         layout.setSpacing(_CAPTION_GAP)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
         name = QLabel(field.name)
         name.setObjectName("fieldName")
-        layout.addWidget(name)
+        head.addWidget(name, 1)
+        button = self._field_generate_button(card, field)
+        if button is not None:
+            head.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(head)
         if field.text:
             value = QLabel(_leaded(field.text))
             value.setObjectName("fieldText")
@@ -453,7 +555,11 @@ class LookupPanel(QWidget):
                 badge.setObjectName("lookupSubtitle")
                 layout.addWidget(badge)
             elif not field.images and not field.audio:
-                badge = QLabel("—")
+                # A field with nothing in it. This used to read "—", which was written for a
+                # case that could not happen (omnia omitted empty fields) and now happens
+                # constantly — and a dash next to a generate button reads like a fault rather
+                # than like an invitation.
+                badge = QLabel("Empty")
                 badge.setObjectName("lookupSubtitle")
                 layout.addWidget(badge)
         # ...but an image is worth seeing, so offer to load it (fetching is a round-trip to
@@ -462,7 +568,13 @@ class LookupPanel(QWidget):
             layout.addWidget(self._audio_block(field.audio))
         if field.images and self._can_show_images():
             layout.addWidget(self._image_block(field.images))
-        return holder
+        status = self._regen.status(card.note_id, field.name)
+        if status:
+            line = QLabel(status)
+            line.setObjectName("fieldStatus")
+            line.setWordWrap(True)
+            layout.addWidget(line)
+        return _FieldRow(widget=holder, button=button)
 
     def _can_play_audio(self) -> bool:
         """Audio needs the same media fetcher images do (the clip lives in Anki's media folder)."""
@@ -570,6 +682,172 @@ class LookupPanel(QWidget):
             label.setText("Image not found in Anki")
             label.setObjectName("lookupSubtitle")
         layout.addWidget(label)
+
+    # -- regeneration --------------------------------------------------------------------
+
+    def _field_generate_button(
+        self, card: LookupCardView, field: LookupFieldView
+    ) -> Optional[QPushButton]:
+        """The small button at the head of a field row, or ``None`` when the seam is absent.
+
+        What it says, and whether it can be pressed, is decided by
+        :class:`~omnia_desktop_clipper.lookup.regeneration.RegenerationState`; this only
+        draws it.
+        """
+        if self._on_generate is None:
+            return None
+        state = self._regen.field_control(card.note_id, field, self._frame())
+        button = QPushButton(state.label)
+        button.setObjectName("fieldGenerate")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedWidth(_GENERATE_WIDTH)
+        button.setToolTip(state.tooltip)
+        button.setEnabled(state.enabled)
+        if state.enabled:
+            button.clicked.connect(
+                lambda _checked=False, name=field.name: self._start_generation(
+                    card.note_id, [name]
+                )
+            )
+        return button
+
+    def _start_generation(self, note_id: int, fields: Optional[list[str]]) -> None:
+        """Mark the fields as running, redraw them, and ask omnia; the answer arrives later."""
+        if self._on_generate is None or not self._regen.allowed:
+            return
+        card = self._card(note_id)
+        if card is None:
+            return
+        # "Generate all" spins every VISIBLE field but asks omnia for the whole note, and omnia
+        # answers only about fields it can generate — a Source or Notes field with no rule is
+        # never mentioned. Flagging the difference here is what stops those rows reporting a
+        # failure that did not happen.
+        started = self._regen.start(
+            note_id,
+            [f.name for f in card.fields] if fields is None else fields,
+            explicit=fields is not None,
+        )
+        if not started:
+            return
+        self._refresh(note_id, started)
+        self._on_generate(note_id, fields)
+
+    def apply_generation(self, note_id: int, outcome: object) -> None:
+        """Fold a ``/generate`` answer into the panel that is open — no re-query, no reopening.
+
+        Applied to whichever matched note it names, even when the switcher has since moved to
+        another one: the data is right either way, and the rows are only redrawn while that
+        note is the one on screen. An answer for a note this panel never showed is dropped.
+
+        Args:
+            note_id: The note the answer is about.
+            outcome: A :class:`~omnia_desktop_clipper.lookup.generate.GenerateOutcome` (typed
+                ``object`` because it crosses a Qt signal).
+        """
+        if self._view is None or not isinstance(outcome, GenerateOutcome):
+            return
+        index = self._index_of(note_id)
+        if index is None:
+            return
+        self._view.cards[index] = outcome.applied_to(self._view.cards[index])
+        self._refresh(note_id, self._regen.finish(note_id, outcome))
+
+    def report_generation_failure(
+        self, note_id: int, message: str, names: Iterable[str] = ()
+    ) -> None:
+        """Show why a request could not run, on the fields IT asked for.
+
+        ``names`` empty means it asked for the whole note, so everything still waiting on that
+        note is settled. Naming them matters when two requests are out at once: a failure of
+        one must not stop the spinner on a field the other is still generating.
+        """
+        self._refresh(note_id, self._regen.fail(note_id, message, names))
+
+    def _refresh(self, note_id: int, names: Iterable[str]) -> None:
+        """Rebuild the named rows (and the footer) from the panel's current state."""
+        self._sync_spinner()
+        wanted = list(names)
+        card = self._shown_card()
+        if card is None or card.note_id != note_id or self._fields_layout is None:
+            return  # the state is kept; the rows belong to a note that is not on screen
+        by_name = {field.name: field for field in card.fields}
+        for name in wanted:
+            row = self._field_rows.get(name)
+            field = by_name.get(name)
+            if row is None or field is None:
+                continue
+            replacement = self._field_block(card, field)
+            self._fields_layout.replaceWidget(row.widget, replacement.widget)
+            row.widget.setParent(None)
+            row.widget.deleteLater()
+            replacement.widget.show()
+            self._field_rows[name] = replacement
+        self._sync_generate_all(card)
+        if wanted and self.isVisible() and self.isActiveWindow():
+            # Re-measure: a generated field is usually taller than the "Empty" it replaced.
+            #
+            # Only while this panel is the ACTIVE window. _present takes focus, and this runs
+            # when an answer lands — up to minutes after the click. On the platforms where
+            # WindowDeactivate does not reliably hide the panel, re-presenting would yank focus
+            # out of whatever the user has since started typing in. Skipping it costs nothing
+            # worse than a taller field having to be scrolled to.
+            self._present(self._position, fresh=False)
+
+    def _sync_generate_all(self, card: LookupCardView) -> None:
+        """Keep the footer button in step: disabled, and spinning, while the note is running."""
+        button = self._generate_all
+        if button is None:
+            return
+        state = self._regen.note_control(card.note_id, self._frame())
+        button.setText(state.label)
+        button.setToolTip(state.tooltip)
+        button.setEnabled(state.enabled)
+
+    def _sync_spinner(self) -> None:
+        """Run the shared spinner timer only while something is actually generating."""
+        busy = self._regen.anything_running()
+        if busy and not self._spin_timer.isActive():
+            self._spin_timer.start()
+        elif not busy and self._spin_timer.isActive():
+            self._spin_timer.stop()
+
+    def _frame(self) -> str:
+        """The spinner frame every running control on screen currently shares."""
+        return SPIN_FRAMES[self._spin_frame]
+
+    def _tick_spinner(self) -> None:
+        """Advance that one frame."""
+        self._spin_frame = (self._spin_frame + 1) % len(SPIN_FRAMES)
+        card = self._shown_card()
+        if card is None:
+            return
+        for name in self._regen.running(card.note_id):
+            row = self._field_rows.get(name)
+            if row is not None and row.button is not None:
+                row.button.setText(self._frame())
+        self._sync_generate_all(card)
+
+    def _shown_card(self) -> Optional[LookupCardView]:
+        """The matched note currently rendered, or ``None`` in any other state."""
+        if self._view is None or not 0 <= self._index < len(self._view.cards):
+            return None
+        return self._view.cards[self._index]
+
+    def _index_of(self, note_id: int) -> Optional[int]:
+        """Where ``note_id`` sits among the matched notes, or ``None`` if it is not one."""
+        if self._view is None:
+            return None
+        for position, card in enumerate(self._view.cards):
+            if card.note_id == note_id:
+                return position
+        return None
+
+    def _card(self, note_id: int) -> Optional[LookupCardView]:
+        """The matched note with ``note_id``, or ``None``."""
+        index = self._index_of(note_id)
+        if index is None or self._view is None:
+            return None
+        return self._view.cards[index]
 
     # -- presentation --------------------------------------------------------------------
 

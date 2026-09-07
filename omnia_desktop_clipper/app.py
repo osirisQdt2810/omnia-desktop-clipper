@@ -34,7 +34,9 @@ from .capture_flow import CaptureAction
 from .config import Config
 from .hotkey import GlobalHotkey
 from .lookup.client import LookupClient
+from .lookup.generate import GenerateClient
 from .lookup.service import LookupService
+from .lookup.token import resolve_token
 from .mouse_watcher import GlobalMouseWatcher
 from .ui.action_overlay import ActionOverlay
 from .ui.icon import plus_icon
@@ -146,6 +148,7 @@ class ClipperApp(QObject):
             on_add=self._add_pending_capture,
             on_open_in_anki=self._open_in_anki,
             request_media=self._request_media,
+            on_generate=self._request_generate,
         )
         # Where the "+" was shown, so the panel opens next to the word you were reading.
         self._last_gesture_pos: tuple[int, int] = (0, 0)
@@ -473,6 +476,23 @@ class ClipperApp(QObject):
     def _on_lookup_failed(self, word: str, message: str) -> None:
         self._lookup_panel.show_error(word, message, self._last_gesture_pos)
 
+    def _request_generate(self, note_id: int, fields: list[str] | None) -> None:
+        """Ask omnia to regenerate a note's fields (``None`` = all of them), off the UI thread.
+
+        The answer takes tens of seconds — it calls an LLM/TTS provider — so it comes back
+        through the service's signals rather than a return value, and lands in the panel that
+        is still open (:meth:`LookupPanel.apply_generation`).
+        """
+        self._lookup.generate(note_id, fields)
+
+    def _on_generate_finished(self, note_id: int, outcome: object) -> None:
+        self._lookup_panel.apply_generation(note_id, outcome)
+
+    def _on_generate_failed(
+        self, note_id: int, message: str, names: object = ()
+    ) -> None:
+        self._lookup_panel.report_generation_failure(note_id, message, tuple(names or ()))
+
     def _add_pending_capture(self) -> None:
         """ "Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""
         pending = self._pending_capture
@@ -526,10 +546,21 @@ class ClipperApp(QObject):
 
     def _build_lookup_service(self) -> LookupService:
         """Construct the lookup service for the configured URL and wire its signals."""
-        service = LookupService(LookupClient(self._config.lookup_url))
+        service = LookupService(
+            LookupClient(self._config.lookup_url),
+            GenerateClient(
+                self._config.lookup_url,
+                # A lambda, not the token itself: it is read per request, so a token omnia
+                # wrote (or rotated) after the clipper started is still found, and a token
+                # typed into Settings takes effect without a restart.
+                token_provider=lambda: resolve_token(self._config.lookup_token),
+            ),
+        )
         service.finished.connect(self._on_lookup_finished)
         service.failed.connect(self._on_lookup_failed)
         service.probed.connect(self._on_lookup_probed)
+        service.generated.connect(self._on_generate_finished)
+        service.generate_failed.connect(self._on_generate_failed)
         return service
 
     def _build_client(self) -> AnkiConnectClient:

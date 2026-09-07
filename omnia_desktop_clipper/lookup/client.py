@@ -21,6 +21,11 @@ from urllib.parse import urlencode
 # the panel can say so instead of spinning.
 _TIMEOUT_SECONDS = 4.0
 
+# Who is asking. omnia answers a known client with more than it answers an anonymous one — the
+# per-field generation state, and whether regenerating is allowed at all — because only a
+# client that can ACT on those has any use for them.
+CLIENT_NAME = "desktop_clipper"
+
 # What a transport returns: the parsed JSON body.
 Transport = Callable[[str], "dict[str, Any]"]
 
@@ -31,13 +36,28 @@ class LookupUnavailableError(Exception):
 
 @dataclass(frozen=True)
 class LookupFieldView:
-    """One field of a matched note, already cleaned and classified by omnia."""
+    """One field of a matched note, already cleaned and classified by omnia.
+
+    ``empty`` and ``state`` are what makes a field actionable rather than merely readable:
+    a never-filled field is the one the user most wants to regenerate, and ``state`` says
+    whether omnia *could* — ``ready``, or one of ``no_rule`` / ``rule_off`` /
+    ``not_generatable`` / ``blocked`` / ``unavailable``. Both default to the permissive
+    reading so an older omnia (which sends neither) still offers the button and lets the
+    service itself give the reason.
+    """
 
     name: str
     text: str
     kind: str = "text"
     audio: tuple[str, ...] = ()
     images: tuple[str, ...] = ()
+    empty: bool = False
+    state: str = "ready"
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether there is nothing in this field (omnia says so, or nothing arrived)."""
+        return self.empty or not (self.text or self.audio or self.images)
 
 
 @dataclass(frozen=True)
@@ -63,6 +83,10 @@ class LookupView:
     word: str
     cards: list[LookupCardView] = field(default_factory=list)
     truncated: bool = False
+    # Whether omnia will accept a regeneration request at all (Smart Notes' "Regenerate from
+    # clippers" option). Defaults to False: an omnia too old to answer the question has no
+    # /generate route either, so offering an enabled button would only produce a failure.
+    can_regenerate: bool = False
 
     @property
     def found(self) -> bool:
@@ -148,7 +172,7 @@ class LookupClient:
         word = word.strip()
         if not word:
             return LookupView(word="")
-        url = f"{self._base_url}/lookup?{urlencode({'word': word})}"
+        url = f"{self._base_url}/lookup?{urlencode({'word': word, 'client': CLIENT_NAME})}"
         payload = self._transport(url)
         if not isinstance(payload, dict):
             raise LookupUnavailableError("The lookup service returned an unexpected response.")
@@ -179,6 +203,8 @@ class LookupClient:
                             kind=str(f.get("kind") or "text"),
                             audio=tuple(str(a) for a in (f.get("audio") or [])),
                             images=tuple(str(i) for i in (f.get("images") or [])),
+                            empty=bool(f.get("empty")),
+                            state=str(f.get("state") or "ready"),
                         )
                         for f in (raw.get("fields") or [])
                         if isinstance(f, dict)
@@ -189,4 +215,5 @@ class LookupClient:
             word=str(payload.get("word") or word),
             cards=cards,
             truncated=bool(payload.get("truncated")),
+            can_regenerate=bool(payload.get("can_regenerate")),
         )
