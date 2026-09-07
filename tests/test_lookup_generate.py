@@ -330,6 +330,14 @@ class TestAgainstARealServer:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):  # stdlib spells it this way
+                # Drain the request body BEFORE the handler answers, and hand it over.
+                # A handler that responds without reading leaves bytes in the socket; the
+                # client is still writing them, the server closes, and on Windows the client
+                # blocks until its own timeout instead of ever seeing the status. That made
+                # the 409 case fail there as "Anki did not answer in time" — a green macOS
+                # and Linux run said nothing about it.
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                self.body = self.rfile.read(length) if length else b""
                 handler(self)
 
             def log_message(self, *args):
@@ -343,8 +351,7 @@ class TestAgainstARealServer:
         seen = {}
 
         def respond(request):
-            length = int(request.headers.get("Content-Length", 0))
-            seen["body"] = json.loads(request.rfile.read(length).decode("utf-8"))
+            seen["body"] = json.loads(request.body.decode("utf-8"))
             seen["token"] = request.headers.get("X-Omnia-Token")
             seen["type"] = request.headers.get("Content-Type")
             payload = json.dumps(_ANSWER).encode("utf-8")
