@@ -488,8 +488,10 @@ class ClipperApp(QObject):
     def _on_generate_finished(self, note_id: int, outcome: object) -> None:
         self._lookup_panel.apply_generation(note_id, outcome)
 
-    def _on_generate_failed(self, note_id: int, message: str) -> None:
-        self._lookup_panel.report_generation_failure(note_id, message)
+    def _on_generate_failed(
+        self, note_id: int, message: str, names: object = ()
+    ) -> None:
+        self._lookup_panel.report_generation_failure(note_id, message, tuple(names or ()))
 
     def _add_pending_capture(self) -> None:
         """ "Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""

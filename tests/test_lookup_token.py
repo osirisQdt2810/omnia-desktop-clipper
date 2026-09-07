@@ -8,6 +8,7 @@ so discovery globs, and these tests pin that it finds both.
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -150,3 +151,30 @@ class TestResolvingTheToken:
 
     def test_nothing_configured_and_nothing_installed_is_empty(self, tmp_path) -> None:
         assert resolve_token("", tmp_path) == ""
+
+
+class TestWhichInstallWins:
+    """A machine can carry two Omnia installs; only one of them is running."""
+
+    def _seed(self, root, folder: str, token: str, mtime: float):
+        path = root / "addons21" / folder / "user_files" / "clippers" / "lookup-token.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(token, encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_the_most_recently_written_token_wins(self, tmp_path):
+        # Alphabetical order always picks 726991726, which is wrong whenever the development
+        # install is the one running — and the symptom is a 401 that restarting never fixes.
+        # Omnia rewrites this file on every enable, so mtime names the live install.
+        self._seed(tmp_path, "726991726", "published", mtime=1_000_000)
+        newer = self._seed(tmp_path, "omnia", "development", mtime=2_000_000)
+
+        assert token_file(tmp_path) == newer
+        assert read_token(tmp_path) == "development"
+
+    def test_the_published_install_wins_when_it_is_the_newer_one(self, tmp_path):
+        newer = self._seed(tmp_path, "726991726", "published", mtime=2_000_000)
+        self._seed(tmp_path, "omnia", "development", mtime=1_000_000)
+
+        assert token_file(tmp_path) == newer

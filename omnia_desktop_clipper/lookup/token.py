@@ -78,13 +78,22 @@ def token_file(data_dir: Path | None = None) -> Path | None:
         data_dir: Anki's data directory. Defaults to :func:`anki_data_dir`.
 
     Returns:
-        The path of the first token file that exists and can be read, or ``None`` when there
-        is none. Candidates are sorted so the answer is stable across runs when a machine
-        carries both a published and a development install.
+        The path of the first readable token file, or ``None`` when there is none. On a
+        machine carrying both a published and a development install, the most recently
+        written wins — that is the one whose Anki is running.
     """
     data_dir = anki_data_dir() if data_dir is None else data_dir
     try:
-        candidates = sorted(data_dir.glob(_TOKEN_GLOB))
+        candidates = sorted(
+            data_dir.glob(_TOKEN_GLOB),
+            # Newest first, NOT alphabetical. A machine can hold both the AnkiWeb install
+            # (folder 726991726) and a development one (folder omnia), and alphabetical order
+            # always picks 726991726 — wrong whenever the dev install is the one running, with
+            # a 401 as the symptom and no amount of restarting as the cure. Omnia rewrites this
+            # file on every enable, so the modification time names the install that started.
+            key=_mtime,
+            reverse=True,
+        )
     except OSError:  # an unreadable / vanished data dir is "no token", never a crash
         return None
     for candidate in candidates:
@@ -124,3 +133,11 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         return ""
+
+
+def _mtime(path: Path) -> float:
+    """``path``'s modification time, or 0.0 when it cannot be read (sorts last)."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0

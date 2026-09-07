@@ -718,9 +718,14 @@ class LookupPanel(QWidget):
         card = self._card(note_id)
         if card is None:
             return
+        # "Generate all" spins every VISIBLE field but asks omnia for the whole note, and omnia
+        # answers only about fields it can generate — a Source or Notes field with no rule is
+        # never mentioned. Flagging the difference here is what stops those rows reporting a
+        # failure that did not happen.
         started = self._regen.start(
             note_id,
             [f.name for f in card.fields] if fields is None else fields,
+            explicit=fields is not None,
         )
         if not started:
             return
@@ -747,9 +752,16 @@ class LookupPanel(QWidget):
         self._view.cards[index] = outcome.applied_to(self._view.cards[index])
         self._refresh(note_id, self._regen.finish(note_id, outcome))
 
-    def report_generation_failure(self, note_id: int, message: str) -> None:
-        """Show, on every field that was waiting, why the request could not run at all."""
-        self._refresh(note_id, self._regen.fail(note_id, message))
+    def report_generation_failure(
+        self, note_id: int, message: str, names: Iterable[str] = ()
+    ) -> None:
+        """Show why a request could not run, on the fields IT asked for.
+
+        ``names`` empty means it asked for the whole note, so everything still waiting on that
+        note is settled. Naming them matters when two requests are out at once: a failure of
+        one must not stop the spinner on a field the other is still generating.
+        """
+        self._refresh(note_id, self._regen.fail(note_id, message, names))
 
     def _refresh(self, note_id: int, names: Iterable[str]) -> None:
         """Rebuild the named rows (and the footer) from the panel's current state."""

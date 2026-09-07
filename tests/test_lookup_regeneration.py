@@ -20,8 +20,11 @@ _NOTE = 123
 _OTHER_NOTE = 456
 
 
-def _outcome(*results, note_id: int = _NOTE) -> GenerateOutcome:
-    return GenerateOutcome(note_id=note_id, results=tuple(results))
+def _outcome(*results, note_id: int = _NOTE, requested=()) -> GenerateOutcome:
+    """An answer. ``requested`` empty is a whole-note request, exactly as on the wire."""
+    return GenerateOutcome(
+        note_id=note_id, results=tuple(results), requested=tuple(requested)
+    )
 
 
 def _generated(field: str, text: str = "new text") -> FieldGeneration:
@@ -293,3 +296,68 @@ class TestStartingARun:
 
         assert state.status(_NOTE, "Definition") == ""
         assert state.anything_running() is False
+
+
+class TestTwoRequestsOnOneNote:
+    """Several fields of one note may generate at once — the buttons allow it on purpose.
+
+    Each answer must settle only the fields ITS request asked for. Settling the whole running
+    set means the first answer back labels a field another request is still generating as
+    unanswered, freezes its spinner, and re-enables its button — and the next press pays a
+    second time for a generation already in flight, on a feature whose whole reason for being
+    authenticated is that it spends money.
+    """
+
+    def _two_running(self) -> RegenerationState:
+        state = RegenerationState()
+        state.reset(allowed=True)
+        state.start(_NOTE, ["Definition"])
+        state.start(_NOTE, ["Audio"])
+        return state
+
+    def test_the_first_answer_leaves_the_other_field_running(self) -> None:
+        state = self._two_running()
+
+        state.finish(
+            _NOTE, _outcome(_generated("Definition"), requested=["Definition"])
+        )
+
+        assert state.running(_NOTE) == {"Audio"}
+        assert state.status(_NOTE, "Audio") == "Generating…"
+        assert state.anything_running() is True
+
+    def test_the_first_answer_does_not_call_the_other_field_unanswered(self) -> None:
+        state = self._two_running()
+
+        state.finish(
+            _NOTE, _outcome(_generated("Definition"), requested=["Definition"])
+        )
+
+        assert state.status(_NOTE, "Audio") != NO_ANSWER
+
+    def test_the_second_answer_finishes_the_note(self) -> None:
+        state = self._two_running()
+
+        state.finish(
+            _NOTE, _outcome(_generated("Definition"), requested=["Definition"])
+        )
+        state.finish(_NOTE, _outcome(_generated("Audio"), requested=["Audio"]))
+
+        assert state.running(_NOTE) == set()
+        assert state.anything_running() is False
+
+    def test_one_request_failing_leaves_the_other_running(self) -> None:
+        state = self._two_running()
+
+        state.fail(_NOTE, "Anki is not running.", ["Definition"])
+
+        assert state.status(_NOTE, "Definition") == "Anki is not running."
+        assert state.running(_NOTE) == {"Audio"}
+
+    def test_a_failure_that_names_nothing_settles_the_whole_note(self) -> None:
+        # A whole-note request names no fields, and it did ask for all of them.
+        state = self._two_running()
+
+        state.fail(_NOTE, "Anki is not running.")
+
+        assert state.running(_NOTE) == set()

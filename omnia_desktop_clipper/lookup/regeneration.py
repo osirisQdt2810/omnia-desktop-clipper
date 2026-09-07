@@ -61,7 +61,9 @@ class RegenerationState:
     def __init__(self, allowed: bool = False) -> None:
         """Start with regeneration disallowed, which is what an answerless panel shows."""
         self._allowed = allowed
-        self._running: dict[int, set[str]] = {}
+        # note id -> {field name: was it named EXPLICITLY by the user}. The flag decides
+        # whether "omnia never mentioned this field" is worth saying: see `finish`.
+        self._running: dict[int, dict[str, bool]] = {}
         self._messages: dict[int, dict[str, str]] = {}
 
     @property
@@ -77,23 +79,43 @@ class RegenerationState:
 
     # -- lifecycle -----------------------------------------------------------------------
 
-    def start(self, note_id: int, names: Iterable[str]) -> list[str]:
+    def start(
+        self, note_id: int, names: Iterable[str], *, explicit: bool = True
+    ) -> list[str]:
         """Mark ``names`` as running for ``note_id``; return them, in order, to be redrawn.
 
         Their previous reasons go: the question is being asked again, and leaving "needs
         Definition" under a spinner claims an answer that no longer applies.
+
+        Args:
+            note_id: The note being generated.
+            names: The fields to put a spinner on.
+            explicit: Whether the user named these fields. "Generate all" spins every VISIBLE
+                field while asking omnia for the whole note, and omnia answers about the fields
+                it can generate — so a Source or Notes field with no rule is never mentioned.
+                That is not a failure and must not be reported as one; only a field the user
+                pointed at earns "omnia did not answer for this field".
         """
         wanted = list(names)
         if not wanted:
             return []
-        self._running.setdefault(note_id, set()).update(wanted)
+        running = self._running.setdefault(note_id, {})
+        for name in wanted:
+            running[name] = running.get(name, False) or explicit
         messages = self._messages.setdefault(note_id, {})
         for name in wanted:
             messages.pop(name, None)
         return wanted
 
     def finish(self, note_id: int, outcome: GenerateOutcome) -> set[str]:
-        """Record an answer; return every field name whose row now needs redrawing."""
+        """Record an answer; return every field name whose row now needs redrawing.
+
+        Settles only the fields THIS request asked for. Several may be generating on one note
+        at once — the design allows it and the buttons permit it — so clearing the whole
+        running set would make the first answer back declare the others unanswered, stop the
+        spinner over a field still being generated, and re-enable a button whose second press
+        would pay for the same generation twice.
+        """
         answered = set(outcome.fields)
         reasons = outcome.messages()
         messages = self._messages.setdefault(note_id, {})
@@ -102,25 +124,54 @@ class RegenerationState:
                 messages[name] = reasons[name]
             else:
                 messages.pop(name, None)  # it generated: the new content IS the message
-        waiting = self._running.pop(note_id, set())
-        for name in waiting - answered:
-            # Asked for, never mentioned. Saying so beats a spinner that never stops.
-            messages[name] = NO_ANSWER
-        return waiting | answered
+        # A whole-note request names no fields on the wire, and it genuinely did ask for all of
+        # them, so it settles everything still running for the note — that is what stops the
+        # third field of a "Generate all" spinning when omnia answered about only two. A
+        # single-field request settles only itself. (A whole-note answer arriving while a
+        # single-field request is out settles that field too, which is harmless: a whole-note
+        # answer speaks about it anyway.)
+        running = self._running.get(note_id, {})
+        requested = set(outcome.requested) or set(running)
+        for name in requested - answered:
+            # Asked for and never mentioned. Worth saying only when the user pointed at this
+            # field; for "Generate all" it just means omnia has no rule for it, which the
+            # field's own state already says.
+            if running.get(name, False):
+                messages[name] = NO_ANSWER
+        return self._settle(note_id, requested | answered)
 
-    def fail(self, note_id: int, message: str) -> set[str]:
-        """Record that the request never ran; return the rows that were waiting on it."""
-        waiting = self._running.pop(note_id, set())
+    def fail(self, note_id: int, message: str, names: Iterable[str] = ()) -> set[str]:
+        """Record that a request never ran; return the rows that were waiting on it.
+
+        ``names`` are the fields that request asked for; empty means the whole note, which
+        settles everything still running for it. Same reason as :meth:`finish`: one request
+        failing must not stop the spinner on a field a different request is still generating.
+        """
+        running = self._running.get(note_id, {})
+        waiting = (set(names) & set(running)) if names else set(running)
         messages = self._messages.setdefault(note_id, {})
         for name in waiting:
             messages[name] = message
-        return waiting
+        return self._settle(note_id, waiting)
+
+    def _settle(self, note_id: int, names: set[str]) -> set[str]:
+        """Drop ``names`` from what is running for ``note_id``; return them."""
+        remaining = {
+            name: explicit
+            for name, explicit in self._running.get(note_id, {}).items()
+            if name not in names
+        }
+        if remaining:
+            self._running[note_id] = remaining
+        else:
+            self._running.pop(note_id, None)
+        return names
 
     # -- what the renderer asks -----------------------------------------------------------
 
     def running(self, note_id: int) -> set[str]:
         """The field names currently generating for ``note_id`` (empty when none are)."""
-        return self._running.get(note_id, set())
+        return set(self._running.get(note_id, {}))
 
     def busy(self, note_id: int) -> bool:
         """Whether anything is generating for ``note_id``."""

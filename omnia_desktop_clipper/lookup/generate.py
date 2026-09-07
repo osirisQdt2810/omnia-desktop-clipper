@@ -142,6 +142,12 @@ class GenerateOutcome:
 
     note_id: int
     results: tuple[FieldGeneration, ...] = ()
+    #: The field names THIS request asked for; empty means it asked for the whole note.
+    #: Carried because several fields of one note may be generating at once — a whole-note
+    #: request and a single-field one, or two single-field ones — and an answer must settle
+    #: only its own, or the first one back declares the others unanswered while they are still
+    #: running.
+    requested: tuple[str, ...] = ()
 
     @property
     def fields(self) -> tuple[str, ...]:
@@ -292,11 +298,19 @@ class GenerateClient:
         )
         if not isinstance(payload, dict):
             raise GenerateError("Anki returned an unexpected response.")
-        return self._to_outcome(note_id, payload)
+        return self._to_outcome(note_id, payload, fields)
 
     @staticmethod
-    def _to_outcome(note_id: int, payload: dict[str, Any]) -> GenerateOutcome:
-        """Convert the service payload into dataclasses, tolerating missing keys."""
+    def _to_outcome(
+        note_id: int,
+        payload: dict[str, Any],
+        fields: Optional[Sequence[str]] = None,
+    ) -> GenerateOutcome:
+        """Convert the service payload into dataclasses, tolerating missing keys.
+
+        ``fields`` is what the request asked for; it is carried on the outcome so the panel can
+        settle only those, even when another request for the same note is still out.
+        """
         results = []
         for raw in payload.get("results") or []:
             if not isinstance(raw, dict):
@@ -317,4 +331,5 @@ class GenerateClient:
         return GenerateOutcome(
             note_id=int(payload.get("note_id") or note_id),
             results=tuple(results),
+            requested=tuple(fields or ()),
         )
