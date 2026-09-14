@@ -547,12 +547,7 @@ class ClipperApp(QObject):
         """Construct the lookup service for the configured URL and wire its signals."""
         service = LookupService(
             LookupClient(self._config.lookup_url),
-            GenerateClient(
-                self._config.lookup_url,
-                # A lambda, not the token itself: it is read per request, so a token omnia
-                # wrote (or rotated) after the clipper started is still found, and a token
-                # typed into Settings takes effect without a restart.
-            ),
+            GenerateClient(self._config.lookup_url),
         )
         service.finished.connect(self._on_lookup_finished)
         service.failed.connect(self._on_lookup_failed)

@@ -3,13 +3,13 @@
 The lookup panel shows what Anki already has for a word. Half the time what it shows is a
 field that is empty, or wrong, or was written before the note type grew a new field — and the
 answer to that is not "open Anki and find the note", it is "generate it, here". This module is
-the client half of that: one authenticated ``POST {lookup_url}/generate``.
+the client half of that: one ``POST {lookup_url}/generate``.
 
 Three things separate it from :mod:`omnia_desktop_clipper.lookup.client`:
 
-* **It mutates.** The request rewrites notes and spends the user's LLM/TTS credits, so it is
-  authenticated with the shared secret omnia writes into its add-on data (see
-  the lookup service).
+* **It mutates.** The request rewrites notes and spends the user's LLM/TTS credits, which is
+  why it sits behind an explicit user action rather than a probe. Nothing authenticates it —
+  the service is loopback-only, so being able to reach it is the permission.
 * **It is slow.** Generation calls a provider; tens of seconds is normal. The lookup's 4 s
   deadline would time out every real request, so this has its own generous one — and its
   caller must be off the Qt main thread (see :class:`~omnia_desktop_clipper.lookup.service.LookupService`).
@@ -66,11 +66,15 @@ _STATUS_HINTS = {
 _HTTP_HINTS = {
     400: "Anki did not understand the request.",
     401: (
-        # Omnia no longer authenticates this endpoint, so a 401 means something ELSE is on that
-        # port — naming a token the add-on has not asked for since would send the reader to a
-        # setting that no longer exists.
-        "Something other than Omnia answered on that port. Check the lookup service address "
-        "in Settings."
+        # Nothing authenticates this endpoint any more, so a 401 means one of two things — and
+        # BOTH have to be named. The clipper ships separately from the add-on, so clipper-new
+        # with add-on-old is routine, and that add-on still demands a token. Offering only the
+        # first sends a user whose URL is perfectly correct off to change the one setting that
+        # was right.
+        "Either something other than Omnia answered on that port, or your Omnia add-on is out "
+        "of date and still expects a password this clipper no longer sends. Update the add-on "
+        "(Tools → Add-ons → Check for Updates), then check the lookup service address in "
+        "Settings."
     ),
     403: "Anki refused the request.",
     409: "Switch on Smart Notes → “Regenerate from clippers” in Anki to allow this.",

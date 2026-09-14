@@ -11,7 +11,7 @@ Three behaviours matter beyond "don't block":
   dropped (see :class:`~omnia_desktop_clipper.lookup.guard.GenerationGuard`).
 * **Probe vs full lookup.** The overlay asks for a cheap "does this exist, and how many?" before
   the user clicks; the panel asks for the whole thing. Both share one client and one guard.
-* **Regeneration.** The same service, a different route: slow, authenticated, and answered
+* **Regeneration.** The same service, a different route: slow, mutating, and answered
   field by field. It gets its own guard, because several fields regenerating at once are all
   still wanted — what makes them stale is a lookup for ANOTHER word, not each other.
 """
@@ -59,7 +59,7 @@ class LookupService(QObject):
 
         Args:
             client: The read-only lookup/media client.
-            generator: The authenticated ``/generate`` client. ``None`` disables regeneration.
+            generator: The mutating ``/generate`` client. ``None`` disables regeneration.
         """
         super().__init__()
         self._client = client

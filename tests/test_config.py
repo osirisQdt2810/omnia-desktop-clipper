@@ -185,7 +185,6 @@ class TestLookupSettings:
         assert Config.from_dict(original.to_dict()) == original
 
 
-
 class TestBrowserSkip:
     def test_defaults_to_standing_aside_in_browsers(self) -> None:
         assert Config().skip_in_browsers is True
