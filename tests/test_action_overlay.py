@@ -101,6 +101,77 @@ class TestThePillFitsItsButtons:
             ), f"{overlay.button_count()} buttons in a {overlay.width()}px pill"
 
 
+class TestThePillLandsOnScreen:
+    """That the widget actually USES the clamp, which the width tests structurally cannot see.
+
+    ``pill_geometry`` has the arithmetic and is tested on every platform; this is the wiring.
+    Removing the clamp from ``show_at`` leaves every width assertion passing, because none of
+    them ever place the pill — which is precisely how the missing clamp got here.
+    """
+
+    @staticmethod
+    def _area():
+        from PyQt6.QtGui import QGuiApplication
+
+        return QGuiApplication.primaryScreen().availableGeometry()
+
+    def test_a_gesture_at_the_right_edge_keeps_the_whole_pill_visible(self, qapp):
+        # The failure: the pill grew from 54px to 80px with the third button, so a selection
+        # near the right edge put the wand — the new one — entirely past it, where a frameless
+        # always-on-top window is clipped rather than scrollable-to.
+        area = self._area()
+        overlay = ActionOverlay(
+            lambda: None, on_lookup=lambda: None, on_check=lambda: None
+        )
+
+        overlay.show_at(area.right() - 30, 100)
+
+        assert (
+            overlay.x() + overlay.width() <= area.right() + 1
+        ), f"the pill runs {overlay.x() + overlay.width() - area.right()}px off the right edge"
+        assert overlay.x() >= area.left()
+
+    def test_a_gesture_at_the_bottom_edge_does_the_same(self, qapp):
+        area = self._area()
+        overlay = ActionOverlay(
+            lambda: None, on_lookup=lambda: None, on_check=lambda: None
+        )
+
+        overlay.show_at(400, area.bottom() - 5)
+
+        assert overlay.y() + overlay.height() <= area.bottom() + 1
+        assert overlay.y() >= area.top()
+
+    def test_a_gesture_in_the_middle_is_left_where_it_was_put(self, qapp):
+        # The clamp must not move a pill that was never in trouble: it would drift away from the
+        # pointer for no reason, and the offset is what keeps it out from under the cursor.
+        from omnia_desktop_clipper.ui.pill_geometry import CURSOR_OFFSET
+
+        overlay = ActionOverlay(
+            lambda: None, on_lookup=lambda: None, on_check=lambda: None
+        )
+
+        overlay.show_at(300, 200)
+
+        assert (overlay.x(), overlay.y()) == (300 + CURSOR_OFFSET, 200 + CURSOR_OFFSET)
+
+    def test_it_holds_for_every_pill_shape(self, qapp):
+        area = self._area()
+        for lookup, check in (
+            (None, None),
+            (lambda: None, None),
+            (lambda: None, lambda: None),
+        ):
+            overlay = ActionOverlay(lambda: None, on_lookup=lookup, on_check=check)
+            overlay.show_at(area.right() - 5, area.bottom() - 5)
+            assert (
+                overlay.x() + overlay.width() <= area.right() + 1
+            ), overlay.button_count()
+            assert (
+                overlay.y() + overlay.height() <= area.bottom() + 1
+            ), overlay.button_count()
+
+
 class TestThePillActsOnTheRightButton:
     def test_the_wand_calls_the_check_callback_and_dismisses(self, qapp):
         pressed: list[str] = []

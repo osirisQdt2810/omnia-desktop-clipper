@@ -194,14 +194,9 @@ class CorrectionPanel(QWidget):
         if correction is None:
             self._body.addWidget(self._message("Checking…"))
             return
-        if not correction.rewritten and not correction.has_changes:
-            # Neither a correction nor an approval: omnia answered with a shape that carries
-            # nothing to show. Saying so beats an empty scroll area under a "CORRECTED" heading
-            # with nothing under it, which reads as the panel being broken.
-            self._body.addWidget(
-                self._message("Omnia did not return a correction for that phrase.")
-            )
-            return
+        # The APPROVAL first. It is the success path of the feature — "your sentence is fine" —
+        # and it was being swallowed by the empty-payload guard below, so a correct sentence was
+        # reported as though the backend had misbehaved.
         if correction.already_good and not correction.has_changes:
             good = QLabel(
                 f"This reads correctly as {mode_label(self._state.mode).lower()}. "
@@ -210,8 +205,20 @@ class CorrectionPanel(QWidget):
             good.setObjectName("correctGood")
             good.setWordWrap(True)
             self._body.addWidget(good)
-        else:
-            self._body.addWidget(self._fix_list(correction))
+            # Only when there is one. An approval whose rewrite is the original echoed back has
+            # a sentence to show; one without is still an approval, just a quieter one.
+            if correction.rewritten:
+                self._body.addWidget(self._final(correction))
+            return
+        if not correction.rewritten and not correction.has_changes:
+            # Neither a correction nor an approval: omnia answered with a shape that carries
+            # nothing to show. Saying so beats an empty scroll area under a "CORRECTED" heading
+            # with nothing under it, which reads as the panel being broken.
+            self._body.addWidget(
+                self._message("Omnia did not return a correction for that phrase.")
+            )
+            return
+        self._body.addWidget(self._fix_list(correction))
         self._body.addWidget(self._final(correction))
 
     def _header(self) -> QWidget:
@@ -326,9 +333,10 @@ class CorrectionPanel(QWidget):
         label = QLabel("CORRECTED")
         label.setObjectName("fixKind")
         head.addWidget(label, 1)
-        # Only when there is something to put on the clipboard. An `already_good` answer may
-        # legitimately omit the rewrite — nothing was rewritten — and a button that does nothing
-        # and says nothing is worse than no button.
+        # Only when there is something to put on the clipboard. A button that does nothing and
+        # says nothing is worse than no button — and a payload without a rewrite is reachable
+        # from an older or a broken omnia even though the current one always sends it (its
+        # parser refuses an answer with no rewritten sentence).
         if correction.rewritten:
             copy = QPushButton("Copy")
             copy.setObjectName("correctAction")

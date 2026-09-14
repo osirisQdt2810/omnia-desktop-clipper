@@ -103,11 +103,6 @@ class Fix:
     kind: str = ""
     is_deletion: bool = False
 
-    @property
-    def label(self) -> str:
-        """The change on one line, for a card's heading."""
-        return f"{self.before} → {'(removed)' if self.is_deletion else self.after}"
-
 
 @dataclass(frozen=True)
 class Correction:

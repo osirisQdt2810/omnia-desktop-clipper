@@ -103,6 +103,19 @@ class TestADismissedPanelStaysDismissed:
         assert panel._state.correction.rewritten == "I went to the shop."
 
 
+def _said(panel) -> str:
+    """Everything the panel currently has on screen, as text.
+
+    Asserting on what it SAYS rather than on which widget exists is the difference between the
+    two versions of the approval test below: the old one checked `_copy_button is None`, which is
+    trivially true when the block holding it was never built at all, and so passed while the
+    panel reported a correct sentence as a backend failure.
+    """
+    from PyQt6.QtWidgets import QLabel
+
+    return " ".join(label.text() for label in panel.findChildren(QLabel))
+
+
 class TestWhatItDrawsForEachAnswer:
     def test_an_answer_with_nothing_in_it_says_so(self, panel):
         # `to_correction` tolerates a payload with no rewrite and no fixes by design. Rendering
@@ -111,14 +124,12 @@ class TestWhatItDrawsForEachAnswer:
 
         panel.apply_correction(ticket, to_correction({}))
 
-        text = " ".join(
-            label.text() for label in panel.findChildren(type(panel._message("")))
-        )
-        assert "did not return a correction" in text
+        assert "did not return a correction" in _said(panel)
 
-    def test_an_approved_sentence_offers_no_copy_button(self, panel):
-        # `already_good` may legitimately omit the rewrite — nothing was rewritten — and a Copy
-        # button that does nothing and says nothing is worse than no button.
+    def test_an_approved_sentence_is_reported_as_an_approval(self, panel):
+        # The success path of the whole feature — "your sentence is fine" — and it was being
+        # swallowed by the empty-payload guard, so a correct sentence came out as "Omnia did not
+        # return a correction", as though the backend had misbehaved.
         ticket = panel.start("I went.", (10, 10))
 
         panel.apply_correction(
@@ -126,7 +137,37 @@ class TestWhatItDrawsForEachAnswer:
             to_correction({"already_good": True, "fixes": [], "mode": "written"}),
         )
 
-        assert panel._copy_button is None
+        said = _said(panel)
+        assert "Nothing to change" in said
+        assert (
+            "did not return a correction" not in said
+        ), "an approval read as a failure"
+        assert panel._copy_button is None, "a Copy button with nothing behind it"
+
+    def test_an_approval_that_echoes_the_sentence_shows_it(self, panel):
+        # What the current add-on actually sends: it derives `already_good` from the two
+        # sentences matching, so an approval carries the original echoed back.
+        ticket = panel.start("I went to the shop.", (10, 10))
+
+        panel.apply_correction(
+            ticket,
+            to_correction(
+                {
+                    "already_good": True,
+                    "fixes": [],
+                    "mode": "written",
+                    "rewritten": "I went to the shop.",
+                    "highlight": [["I went to the shop.", False]],
+                }
+            ),
+        )
+
+        said = _said(panel)
+        assert "Nothing to change" in said
+        assert "I went to the shop." in said, "it hid the sentence it approved of"
+        assert (
+            panel._copy_button is not None
+        ), "nothing to copy an approved sentence with"
 
     def test_a_real_correction_offers_one(self, panel):
         ticket = panel.start("I have went to the shop.", (10, 10))

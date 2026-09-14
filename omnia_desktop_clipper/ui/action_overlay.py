@@ -26,18 +26,27 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtCore import QPoint, QSize, Qt, QTimer
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
+from . import pill_geometry
 from .icon import search_icon, wand_icon
 from .macos_window import promote_over_all_apps
 
-_AUTO_HIDE_MS = 4000  # two targets need more aiming time than the original single "+"
+# Three targets need more aiming time than the original single "+", and the timer pauses while
+# the pointer is over the pill, so the extra button never races it. Unchanged when the third
+# button arrived: four seconds was already generous for two, and the pause-on-hover is what
+# actually carries the aiming — a longer blind timer would only leave a stale pill on screen.
+_AUTO_HIDE_MS = 4000
 _AUTO_HIDE_AFTER_LEAVE_MS = 1200
-_CURSOR_OFFSET = 12  # px down-right of the cursor, so the pill isn't under the pointer
-_BUTTON = 22
-_GAP = 4
-_PAD = 3
+# The geometry lives in pill_geometry, which has no Qt in it and is therefore checked on every
+# platform on every run -- including the ones where a QApplication cannot be built. That is not
+# tidiness: the screen-edge rule is the thing that has now broken twice.
+_CURSOR_OFFSET = pill_geometry.CURSOR_OFFSET
+_BUTTON = pill_geometry.BUTTON_PX
+_GAP = pill_geometry.GAP_PX
+_PAD = pill_geometry.PAD_PX
 
 _ADD_QSS = (
     "QPushButton { background:#2f81f7; color:white; border:none; border-radius:11px;"
@@ -170,25 +179,54 @@ class ActionOverlay(QWidget):
         return 1 + int(self._lookup_visible) + int(self._check_visible)
 
     def _resize_to_content(self) -> None:
-        """Pin the pill to exactly its buttons (never a stray default-sized window).
-
-        Derived, not a constant per shape: a width tuned for two buttons left most of a third
-        past the screen edge, and a fourth would do it again.
-        """
-        buttons = self.button_count()
-        width = _PAD * 2 + buttons * _BUTTON + _GAP * max(0, buttons - 1)
-        self.setFixedSize(width, _PAD * 2 + _BUTTON)
+        """Pin the pill to exactly its buttons (never a stray default-sized window)."""
+        self.setFixedSize(
+            pill_geometry.pill_width(self.button_count()), pill_geometry.pill_height()
+        )
 
     def show_at(self, x: int, y: int) -> None:
-        """Show the pill just down-right of screen ``(x, y)``, auto-hiding after a delay."""
+        """Show the pill just down-right of screen ``(x, y)``, auto-hiding after a delay.
+
+        Clamped to the screen, which it was NOT before. The pill grew from 54px to 80px with the
+        third button, so a selection near the right edge put the wand — the new one — entirely
+        past the edge, where a frameless always-on-top window is clipped rather than
+        scrollable-to. A right-hand column is a common place to be selecting text.
+        """
         self._resize_to_content()
-        self.move(x + _CURSOR_OFFSET, y + _CURSOR_OFFSET)
+        self.move(*self._placement(x, y))
         self.show()
         self.raise_()
         promote_over_all_apps(
             self
         )  # float above the frontmost app, without stealing focus
         self._hide_timer.start(_AUTO_HIDE_MS)
+
+    def _placement(self, x: int, y: int) -> tuple[int, int]:
+        """Where to put the pill for a gesture at ``(x, y)``, kept on screen.
+
+        The arithmetic is in :mod:`omnia_desktop_clipper.ui.pill_geometry`; this half only asks
+        Qt which screen the pointer is on. A pointer on no screen at all (it happens between
+        displays) falls back to the primary one, and then to the unclamped position rather than
+        to nothing.
+        """
+        screen = (
+            QGuiApplication.screenAt(QPoint(x, y)) or QGuiApplication.primaryScreen()
+        )
+        if screen is None:  # pragma: no cover - no screens at all
+            return x + _CURSOR_OFFSET, y + _CURSOR_OFFSET
+        area = screen.availableGeometry()
+        return pill_geometry.place(
+            x,
+            y,
+            self.width(),
+            self.height(),
+            pill_geometry.Area(
+                left=area.left(),
+                top=area.top(),
+                right=area.right(),
+                bottom=area.bottom(),
+            ),
+        )
 
     # -- lookup hinting ------------------------------------------------------------------
 

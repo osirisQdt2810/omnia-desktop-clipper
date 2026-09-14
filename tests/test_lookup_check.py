@@ -185,7 +185,9 @@ class TestTheAnswer:
 
         assert [fix.before for fix in correction.fixes] == ["a"]
 
-    def test_a_deletion_says_so_on_its_label(self):
+    def test_a_deletion_is_flagged_as_one(self):
+        # The panel says "(removed)" itself — the three parts of a change are styled separately,
+        # so a single pre-joined string could not carry it, and `Fix.label` had no caller.
         correction = to_correction(
             {
                 "rewritten": "x",
@@ -193,7 +195,8 @@ class TestTheAnswer:
             }
         )
 
-        assert "(removed)" in correction.fixes[0].label
+        assert correction.fixes[0].is_deletion is True
+        assert correction.fixes[0].after == ""
 
     def test_an_empty_payload_is_an_answer_rather_than_an_exception(self):
         # A panel that raised on an unexpected shape turns a partial answer into no answer.
