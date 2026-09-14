@@ -6,14 +6,17 @@ window is clipped rather than scrollable-to, and the right-hand column is a comm
 selecting text. The width here is derived rather than written down, and this is what holds it
 to that.
 
-Skipped where PyQt6 is absent; CI installs it from requirements.txt.
+Skipped where PyQt6 is absent, and where ``QtWidgets`` cannot load — a headless Linux runner has
+no ``libEGL``, and asking for a widget there is an ImportError at COLLECTION time, which fails
+the whole suite rather than skipping one file. ``importorskip`` on the submodule is what turns
+that into a skip. CI installs PyQt6 from requirements.txt; macOS and Windows run this for real.
 """
 
 from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PyQt6")
+pytest.importorskip("PyQt6.QtWidgets")
 
 from omnia_desktop_clipper.ui.action_overlay import _BUTTON, _GAP, _PAD, ActionOverlay
 

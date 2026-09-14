@@ -143,17 +143,24 @@ def _as_fix(raw: Any) -> Optional[Fix]:
 
 
 def _as_runs(raw: Any, rewritten: str) -> tuple[tuple[str, bool], ...]:
-    """The highlight runs from the wire.
+    """The highlight runs from the wire, checked against the sentence they claim to be.
 
     A payload without them falls back to the plain sentence rather than to a guess: an older
     omnia, or one that could not diff, is better served by an unmarked rewrite than by this side
     inventing which words moved.
+
+    A payload whose runs do NOT join back to ``rewritten`` falls back the same way. The panel
+    renders the runs and the Copy button hands over ``rewritten``, so runs that disagree would
+    put something on the clipboard other than the sentence on screen — and a user who pastes a
+    correction they did not read is exactly who this feature is for.
     """
     runs: list[tuple[str, bool]] = []
     for entry in raw or ():
         if isinstance(entry, (list, tuple)) and entry:
             runs.append((str(entry[0]), bool(entry[1]) if len(entry) > 1 else False))
-    return tuple(runs) if runs else ((rewritten, False),)
+    if not runs or "".join(text for text, _new in runs) != rewritten:
+        return ((rewritten, False),)
+    return tuple(runs)
 
 
 def to_correction(payload: dict[str, Any]) -> Correction:

@@ -156,10 +156,6 @@ class ClipperApp(QObject):
         # Its own panel, not a mode of the lookup one: they answer different questions about the
         # same selection, and a glance has to be enough to tell which is on screen.
         self._correct_panel = CorrectionPanel(on_check=self._request_check)
-        # Which /check request the panel is waiting for. Held HERE because the service answers
-        # by signal and the panel starts requests of its own (the register toggle), so the two
-        # have to agree on what "current" means.
-        self._check_ticket = 0
         # Where the "+" was shown, so the panel opens next to the word you were reading.
         self._last_gesture_pos: tuple[int, int] = (0, 0)
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
@@ -434,8 +430,15 @@ class ClipperApp(QObject):
         # A new selection makes any panel on screen stale — hide them before showing the pill.
         # BOTH: a correction left up over a new selection is not stale decoration, it is a wrong
         # answer to the question now on screen.
+        #
+        # And a check IN FLIGHT has to be abandoned explicitly. The only thing fired below is
+        # `probe`, which deliberately invalidates lookups alone, so nothing else on this path
+        # supersedes it — and a correction that lands afterwards does not merely draw into a
+        # hidden panel, it shows, raises and ACTIVATES it, stealing focus from whatever the user
+        # has since started typing in.
         self._lookup_panel.hide()
         self._correct_panel.hide()
+        self._lookup.cancel_check()
         self._plus_overlay.set_lookup_hint(
             None, word
         )  # neutral until the probe answers
@@ -476,23 +479,22 @@ class ClipperApp(QObject):
         # The lookup panel answers a different question about the same selection; two popovers
         # stacked at the cursor is not a layout anybody meant.
         self._lookup_panel.hide()
-        self._check_ticket = self._correct_panel.start(phrase, self._last_gesture_pos)
-        self._lookup.check(phrase, "", False)
+        ticket = self._correct_panel.start(phrase, self._last_gesture_pos)
+        self._lookup.check(phrase, "", False, ticket)
 
     def _request_check(self, phrase: str, mode: str, refresh: bool) -> None:
         """The panel's register toggle: check the same phrase as the other register.
 
         The panel has already started its own request and holds the ticket; this only has to
-        keep the app's copy in step and put the call on a worker thread.
+        carry it to the service, which echoes it back with the answer.
         """
-        self._check_ticket = self._correct_panel.ticket()
-        self._lookup.check(phrase, mode, refresh)
+        self._lookup.check(phrase, mode, refresh, self._correct_panel.ticket())
 
-    def _on_check_finished(self, phrase: str, correction: object) -> None:
-        self._correct_panel.apply_correction(self._check_ticket, correction)
+    def _on_check_finished(self, phrase: str, correction: object, ticket: int) -> None:
+        self._correct_panel.apply_correction(ticket, correction)
 
-    def _on_check_failed(self, phrase: str, message: str) -> None:
-        self._correct_panel.report_failure(self._check_ticket, message)
+    def _on_check_failed(self, phrase: str, message: str, ticket: int) -> None:
+        self._correct_panel.report_failure(ticket, message)
 
     def _on_lookup_clicked(self) -> None:
         """The magnifier was clicked: open the panel (loading) and run the full lookup."""

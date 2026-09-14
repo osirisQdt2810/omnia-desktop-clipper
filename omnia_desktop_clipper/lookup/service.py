@@ -55,10 +55,15 @@ class LookupService(QObject):
     # (note_id, message, requested field names) — the regeneration could not run at all.
     # The names travel with it so a failure clears only the fields THIS request asked for.
     generate_failed = pyqtSignal("qint64", str, object)
-    # (phrase, Correction) — a completed phrase check, on the Qt main thread.
-    checked = pyqtSignal(str, object)
-    # (phrase, message) — the check could not run. The message is shown as-is.
-    check_failed = pyqtSignal(str, str)
+    # (phrase, Correction, ticket) — a completed phrase check, on the Qt main thread.
+    #
+    # The ticket is the CALLER's, carried through untouched. The panel starts requests of its
+    # own (the register toggle), so it is the only thing that knows which answer it is waiting
+    # for; a ticket the app looked up when the answer arrived would always be the latest one and
+    # the comparison could never fail.
+    checked = pyqtSignal(str, object, int)
+    # (phrase, message, ticket) — the check could not run. The message is shown as-is.
+    check_failed = pyqtSignal(str, str, int)
 
     def __init__(
         self,
@@ -188,7 +193,22 @@ class LookupService(QObject):
 
         self._spawn(work, name="omnia-generate")
 
-    def check(self, text: str, mode: str = "", refresh: bool = False) -> None:
+    def cancel_check(self) -> None:
+        """Abandon a check in flight, without starting one.
+
+        Called when the panel it would have drawn into is dismissed. Without it the answer is
+        still "current" when it lands, and :meth:`CorrectionPanel._present` shows, raises and
+        ACTIVATES the panel unconditionally — so a correction for a phrase the user left behind
+        pops back onto the screen and takes keyboard focus from whatever they are now typing in.
+
+        A probe deliberately does not do this (see :meth:`probe`), and it is the only thing a new
+        selection fires, which is why the dismissal has to say so itself.
+        """
+        self._checks.invalidate()
+
+    def check(
+        self, text: str, mode: str = "", refresh: bool = False, ticket: int = 0
+    ) -> None:
         """Correct ``text`` in the background; emits :attr:`checked` or :attr:`check_failed`.
 
         Unlike a regeneration this DOES supersede its predecessors. The register toggle re-asks
@@ -200,13 +220,14 @@ class LookupService(QObject):
             text: The selected phrase.
             mode: ``"written"``, ``"spoken"``, or empty for whatever omnia is set to.
             refresh: True to ignore omnia's remembered answer and ask again.
+            ticket: The caller's own token, echoed back with the answer. Opaque here.
         """
         phrase = (text or "").strip()
         if not phrase:
             return
         if self._checker is None:
             self.check_failed.emit(
-                phrase, "Checking a phrase is not available in this build."
+                phrase, "Checking a phrase is not available in this build.", ticket
             )
             return
         generation = self._checks.invalidate()
@@ -217,14 +238,16 @@ class LookupService(QObject):
                 correction = checker.check(phrase, mode, refresh)
             except CheckError as exc:
                 if self._checks.is_current(generation):
-                    self.check_failed.emit(phrase, str(exc))
+                    self.check_failed.emit(phrase, str(exc), ticket)
                 return
             except Exception:
                 if self._checks.is_current(generation):
-                    self.check_failed.emit(phrase, "The check failed unexpectedly.")
+                    self.check_failed.emit(
+                        phrase, "The check failed unexpectedly.", ticket
+                    )
                 return
             if self._checks.is_current(generation):
-                self.checked.emit(phrase, correction)
+                self.checked.emit(phrase, correction, ticket)
 
         self._spawn(work, name="omnia-check")
 

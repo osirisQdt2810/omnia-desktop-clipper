@@ -147,6 +147,27 @@ class TestTheAnswer:
 
         assert correction.highlight == (("I went.", False),)
 
+    def test_runs_that_do_not_spell_the_rewrite_are_refused(self):
+        # The panel renders the RUNS and Copy hands over `rewritten`, so runs that disagree put
+        # something on the clipboard other than the sentence on screen — and a user who pastes a
+        # correction they did not read is exactly who this feature is for. Better unmarked and
+        # honest than marked and wrong.
+        correction = to_correction(
+            {
+                "rewritten": "I went to the shop.",
+                "highlight": [["something else", True]],
+            }
+        )
+
+        assert correction.highlight == (("I went to the shop.", False),)
+
+    def test_runs_that_do_spell_it_are_kept_whole(self):
+        correction = to_correction(
+            {"rewritten": "I went.", "highlight": [["I ", False], ["went.", True]]}
+        )
+
+        assert correction.highlight == (("I ", False), ("went.", True))
+
     def test_an_entry_that_is_not_a_run_is_dropped_rather_than_crashing(self):
         correction = to_correction(
             {
@@ -326,13 +347,17 @@ class TestTheMarkedRewrite:
         # The phrase is whatever the user selected in some other application, and the rewrite is
         # a model's prose. Both are interpolated into rich text.
         correction = to_correction(
-            {"rewritten": "<b>x</b>", "highlight": [["<img src=x>", True]]}
+            {
+                "rewritten": "<img src=x> and <b>bold</b>",
+                "highlight": [["<img src=x>", True], [" and <b>bold</b>", False]],
+            }
         )
 
         rich = rich_rewrite(correction)
 
         assert "<img" not in rich
         assert "&lt;img" in rich
+        assert "<b style=" in rich, "the marking itself must survive the escaping"
 
     def test_nothing_at_all_renders_as_nothing(self):
         assert rich_rewrite(None) == ""

@@ -5,6 +5,11 @@ up here is which answers the SERVICE lets through. Its guard and the panel's tic
 different mechanisms solving the same problem at two different layers, and a test of one says
 nothing about the other.
 
+A ``QCoreApplication``, not a ``QApplication``: these tests need an event loop to deliver a
+signal emitted on a worker thread, and nothing else. ``QtWidgets`` pulls in ``libEGL``, which a
+headless Linux runner does not have, so asking for it here would skip the suite on a platform
+that can perfectly well run it.
+
 Skipped where PyQt6 is absent; CI installs it from requirements.txt.
 """
 
@@ -14,7 +19,7 @@ import threading
 
 import pytest
 
-pytest.importorskip("PyQt6")
+pytest.importorskip("PyQt6.QtCore")
 
 from omnia_desktop_clipper.lookup.check import CheckError
 from omnia_desktop_clipper.lookup.service import LookupService
@@ -65,9 +70,9 @@ def _drain(qapp, predicate, timeout=5.0):
 
 @pytest.fixture(scope="module")
 def qapp():
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QCoreApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = QCoreApplication.instance() or QCoreApplication([])
     yield app
 
 
@@ -76,9 +81,7 @@ class TestTheCheckSignal:
         checker = _Checker()
         service = LookupService(_NullClient(), checker=checker)
         seen: list[tuple] = []
-        service.checked.connect(
-            lambda phrase, correction: seen.append((phrase, correction))
-        )
+        service.checked.connect(lambda *args: seen.append(args))
 
         service.check("I have went.", "spoken", True)
 
@@ -87,14 +90,49 @@ class TestTheCheckSignal:
         assert seen[0][1].rewritten == "I went."
         assert checker.calls == [("I have went.", "spoken", True)]
 
+    def test_the_caller_s_ticket_comes_back_untouched(self, qapp):
+        # The panel starts requests of its own (the register toggle), so it is the only thing
+        # that knows which answer it is waiting for. A ticket the app looked up when the answer
+        # ARRIVED would always be the latest one, and the panel's guard could never fire.
+        checker = _Checker()
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[tuple] = []
+        service.checked.connect(lambda *args: seen.append(args))
+
+        service.check("I have went.", "", False, 41)
+
+        assert _drain(qapp, lambda: seen)
+        assert seen[0][2] == 41
+
+    def test_the_ticket_comes_back_on_the_failure_path_too(self, qapp):
+        checker = _Checker()
+        checker.raises = CheckError("nope")
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[tuple] = []
+        service.check_failed.connect(lambda *args: seen.append(args))
+
+        service.check("x", "", False, 7)
+
+        assert _drain(qapp, lambda: seen)
+        assert seen[0][2] == 7
+
+    def test_a_build_without_a_checker_still_returns_the_ticket(self, qapp):
+        # Otherwise the panel never learns this request is over, and spins for ever.
+        service = LookupService(_NullClient())
+        seen: list[tuple] = []
+        service.check_failed.connect(lambda *args: seen.append(args))
+
+        service.check("x", "", False, 9)
+
+        assert _drain(qapp, lambda: seen)
+        assert seen[0][2] == 9
+
     def test_a_failure_comes_back_with_its_own_sentence(self, qapp):
         checker = _Checker()
         checker.raises = CheckError("Phrase Check is switched off.")
         service = LookupService(_NullClient(), checker=checker)
         seen: list[tuple] = []
-        service.check_failed.connect(
-            lambda phrase, message: seen.append((phrase, message))
-        )
+        service.check_failed.connect(lambda *args: seen.append(args))
 
         service.check("x")
 
@@ -106,9 +144,7 @@ class TestTheCheckSignal:
         checker.raises = ValueError("an internal detail")
         service = LookupService(_NullClient(), checker=checker)
         seen: list[tuple] = []
-        service.check_failed.connect(
-            lambda phrase, message: seen.append((phrase, message))
-        )
+        service.check_failed.connect(lambda *args: seen.append(args))
 
         service.check("x")
 
@@ -121,9 +157,7 @@ class TestTheCheckSignal:
     def test_no_checker_says_so_instead_of_hanging(self, qapp):
         service = LookupService(_NullClient())
         seen: list[tuple] = []
-        service.check_failed.connect(
-            lambda phrase, message: seen.append((phrase, message))
-        )
+        service.check_failed.connect(lambda *args: seen.append(args))
 
         service.check("x")
 
@@ -149,7 +183,7 @@ class TestWhichAnswersSurvive:
         service = LookupService(_NullClient(), checker=slow)
         seen: list[str] = []
         service.checked.connect(
-            lambda phrase, correction: seen.append(correction.rewritten)
+            lambda _p, correction, _t: seen.append(correction.rewritten)
         )
 
         service.check("I have went.", "")
@@ -172,7 +206,7 @@ class TestWhichAnswersSurvive:
         checker.block = True
         service = LookupService(_NullClient(), checker=checker)
         seen: list[str] = []
-        service.checked.connect(lambda phrase, correction: seen.append(phrase))
+        service.checked.connect(lambda phrase, _c, _t: seen.append(phrase))
 
         service.check("I have went.")
         assert checker.started.wait(5)
@@ -182,3 +216,26 @@ class TestWhichAnswersSurvive:
         assert not _drain(
             qapp, lambda: seen, timeout=0.6
         ), "a correction for the previous selection arrived anyway"
+
+    def test_cancelling_abandons_a_check_without_starting_one(self, qapp):
+        # The route a new SELECTION takes. It fires only `probe`, which deliberately invalidates
+        # lookups alone, so nothing else on that path supersedes a check — and a correction that
+        # lands afterwards does not merely draw into a hidden panel, it shows, raises and
+        # ACTIVATES it, taking focus from whatever the user is now typing in.
+        checker = _Checker()
+        checker.block = True
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[str] = []
+        service.checked.connect(lambda phrase, _c, _t: seen.append(phrase))
+
+        service.check("I have went.")
+        assert checker.started.wait(5)
+        service.cancel_check()
+        checker.released.set()
+
+        assert not _drain(
+            qapp, lambda: seen, timeout=0.6
+        ), "the abandoned correction arrived and would have reopened the panel"
+        assert checker.calls == [
+            ("I have went.", "", False)
+        ], "cancelling started a request"

@@ -117,6 +117,22 @@ class CorrectionPanel(QWidget):
             self.hide()
         return super().event(event)
 
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt's own name
+        """Abandon whatever request was in flight when the panel went away.
+
+        Dismissing the panel is the user saying they are done with that answer, and
+        :meth:`_present` shows, raises and ACTIVATES unconditionally — so an answer accepted
+        after a dismissal does not merely draw into a hidden widget, it pops the panel back onto
+        the screen at the old position and takes keyboard focus from whatever the user has since
+        started typing in.
+
+        Bumping the ticket here rather than checking ``isVisible()`` in each entry point,
+        because ``hideEvent`` is the one place every dismissal route passes through: Escape, the
+        WindowDeactivate auto-hide, and an explicit ``hide()`` from a new selection.
+        """
+        self._state.ticket += 1
+        super().hideEvent(event)
+
     # -- states --------------------------------------------------------------------------
 
     def start(self, phrase: str, position: tuple[int, int], mode: str = "") -> int:
@@ -177,6 +193,14 @@ class CorrectionPanel(QWidget):
         correction = self._state.correction
         if correction is None:
             self._body.addWidget(self._message("Checking…"))
+            return
+        if not correction.rewritten and not correction.has_changes:
+            # Neither a correction nor an approval: omnia answered with a shape that carries
+            # nothing to show. Saying so beats an empty scroll area under a "CORRECTED" heading
+            # with nothing under it, which reads as the panel being broken.
+            self._body.addWidget(
+                self._message("Omnia did not return a correction for that phrase.")
+            )
             return
         if correction.already_good and not correction.has_changes:
             good = QLabel(
