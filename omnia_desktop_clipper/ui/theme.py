@@ -110,6 +110,19 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r}, {g}, {b}, {alpha:.2f})"
 
 
+#: The correction panel's accent, in one place so the panel, its icon and its marked words
+#: cannot drift apart. Not on :class:`Palette`: it is the same green in light and dark, because
+#: it is carrying a MEANING ("this is the corrected half") rather than following the appearance.
+_CORRECTION_ACCENT = "#1f9d63"
+#: What was written, on its way out. Red enough to read as "this was wrong" without shouting.
+_CORRECTION_BEFORE = "#c0554c"
+
+
+def correction_accent() -> str:
+    """The correction panel's accent colour, for the parts painted rather than styled."""
+    return _CORRECTION_ACCENT
+
+
 def stylesheet(colors: Palette) -> str:
     """Build the lookup panel's QSS from ``colors``.
 
@@ -127,7 +140,60 @@ def stylesheet(colors: Palette) -> str:
     accent_edge = _rgba(colors.accent, 0.22)
     field_bg = _rgba(colors.surface_rgb, 0.55)
     field_bg_hover = _rgba(colors.surface_rgb, 0.95)
+    # The correction panel's own accent. GREEN against the lookup panel's blue, deliberately:
+    # the two open from the same pill over the same selection and answer different questions,
+    # so a glance has to be enough to tell which one is on screen.
+    correct = _CORRECTION_ACCENT
+    correct_soft = "rgba(31, 157, 99, 0.10)"
+    correct_edge = "rgba(31, 157, 99, 0.26)"
     return f"""
+    #correctBand {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+            stop:0 {correct_soft}, stop:1 rgba(0, 0, 0, 0));
+        border: 1px solid {correct_edge};
+        border-radius: 10px;
+    }}
+    #fixCard {{
+        background: {field_bg};
+        border: 1px solid {colors.border};
+        border-left: 3px solid {correct_edge};
+        border-radius: 8px;
+    }}
+    #fixCard:hover {{
+        background: {field_bg_hover};
+        border-left: 3px solid {correct};
+    }}
+    #fixBefore {{ font-size: 13px; color: {_CORRECTION_BEFORE}; }}
+    #fixAfter {{ font-size: 13px; color: {correct}; font-weight: 600; }}
+    #fixArrow {{ font-size: 11px; color: {colors.muted}; }}
+    #fixKind {{
+        font-size: 10px; color: {colors.muted};
+        text-transform: uppercase; letter-spacing: 0.4px;
+    }}
+    #fixWhy {{ font-size: 12px; color: {colors.text}; }}
+    #correctedText {{ font-size: 14px; color: {colors.text}; }}
+    #correctGood {{
+        font-size: 13px; color: {correct};
+        background: {correct_soft}; border-radius: 8px; padding: 9px 11px;
+    }}
+    QPushButton#correctAction {{
+        background: transparent;
+        color: {colors.muted};
+        border: 1px solid {colors.border};
+        border-radius: 7px;
+        padding: 3px 10px;
+        font-size: 11px;
+    }}
+    QPushButton#correctAction:hover {{ color: {correct}; border-color: {correct}; }}
+    QPushButton#correctActive {{
+        background: {correct};
+        color: white;
+        border: 1px solid {correct};
+        border-radius: 7px;
+        padding: 3px 10px;
+        font-size: 11px;
+        font-weight: 600;
+    }}
     #headerBand {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
             stop:0 {accent_soft}, stop:1 rgba(0, 0, 0, 0));

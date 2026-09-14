@@ -33,12 +33,14 @@ from .capture.ocr import RapidOcrEngine, RegionOcrCapture
 from .capture_flow import CaptureAction
 from .config import Config
 from .hotkey import GlobalHotkey
+from .lookup.check import CheckClient
 from .lookup.client import LookupClient
 from .lookup.generate import GenerateClient
 from .lookup.service import LookupService
 from .mouse_watcher import GlobalMouseWatcher
 from .ui.action_overlay import ActionOverlay
 from .ui.icon import plus_icon
+from .ui.correct_panel import CorrectionPanel
 from .ui.lookup_panel import LookupPanel
 from .ui.popup import CapturePopup
 from .ui.region_overlay import RegionSelectOverlay, grab_region
@@ -138,7 +140,9 @@ class ClipperApp(QObject):
         # Always wire the lookup callback and let the config decide visibility, so Settings can
         # toggle the magnifier without rebuilding the overlay.
         self._plus_overlay = ActionOverlay(
-            self._on_plus_clicked, on_lookup=self._on_lookup_clicked
+            self._on_plus_clicked,
+            on_lookup=self._on_lookup_clicked,
+            on_check=self._on_check_clicked,
         )
         self._plus_overlay.set_lookup_enabled(self._config.lookup_enabled)
         # Lookup: omnia's add-on plugin does the searching/triage; this app renders the answer.
@@ -149,6 +153,13 @@ class ClipperApp(QObject):
             request_media=self._request_media,
             on_generate=self._request_generate,
         )
+        # Its own panel, not a mode of the lookup one: they answer different questions about the
+        # same selection, and a glance has to be enough to tell which is on screen.
+        self._correct_panel = CorrectionPanel(on_check=self._request_check)
+        # Which /check request the panel is waiting for. Held HERE because the service answers
+        # by signal and the panel starts requests of its own (the register toggle), so the two
+        # have to agree on what "current" means.
+        self._check_ticket = 0
         # Where the "+" was shown, so the panel opens next to the word you were reading.
         self._last_gesture_pos: tuple[int, int] = (0, 0)
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
@@ -420,8 +431,11 @@ class ClipperApp(QObject):
         context = self._context.resolve(selection, position=(x, y))
         self._pending_capture = (word, context)
         self._last_gesture_pos = (x, y)
-        # A new selection makes any panel on screen stale — hide it before showing the pill.
+        # A new selection makes any panel on screen stale — hide them before showing the pill.
+        # BOTH: a correction left up over a new selection is not stale decoration, it is a wrong
+        # answer to the question now on screen.
         self._lookup_panel.hide()
+        self._correct_panel.hide()
         self._plus_overlay.set_lookup_hint(
             None, word
         )  # neutral until the probe answers
@@ -453,12 +467,41 @@ class ClipperApp(QObject):
             return
         self._warmer.ensure(platform_helpers.frontmost_pid())
 
+    def _on_check_clicked(self) -> None:
+        """The wand was clicked: open the correction panel (waiting) and run the check."""
+        pending = self._pending_capture
+        phrase = pending[0] if pending else ""
+        if not phrase:
+            return
+        # The lookup panel answers a different question about the same selection; two popovers
+        # stacked at the cursor is not a layout anybody meant.
+        self._lookup_panel.hide()
+        self._check_ticket = self._correct_panel.start(phrase, self._last_gesture_pos)
+        self._lookup.check(phrase, "", False)
+
+    def _request_check(self, phrase: str, mode: str, refresh: bool) -> None:
+        """The panel's register toggle: check the same phrase as the other register.
+
+        The panel has already started its own request and holds the ticket; this only has to
+        keep the app's copy in step and put the call on a worker thread.
+        """
+        self._check_ticket = self._correct_panel.ticket()
+        self._lookup.check(phrase, mode, refresh)
+
+    def _on_check_finished(self, phrase: str, correction: object) -> None:
+        self._correct_panel.apply_correction(self._check_ticket, correction)
+
+    def _on_check_failed(self, phrase: str, message: str) -> None:
+        self._correct_panel.report_failure(self._check_ticket, message)
+
     def _on_lookup_clicked(self) -> None:
         """The magnifier was clicked: open the panel (loading) and run the full lookup."""
         pending = self._pending_capture
         word = pending[0] if pending else ""
         if not word:
             return
+        # Same the other way round: opening one popover closes the other.
+        self._correct_panel.hide()
         self._lookup_panel.show_loading(word, self._last_gesture_pos)
         self._lookup.lookup(word)
 
@@ -490,7 +533,9 @@ class ClipperApp(QObject):
     def _on_generate_failed(
         self, note_id: int, message: str, names: object = ()
     ) -> None:
-        self._lookup_panel.report_generation_failure(note_id, message, tuple(names or ()))
+        self._lookup_panel.report_generation_failure(
+            note_id, message, tuple(names or ())
+        )
 
     def _add_pending_capture(self) -> None:
         """ "Add to Anki" from the lookup panel's not-found state: reuse the capture popup path."""
@@ -548,7 +593,10 @@ class ClipperApp(QObject):
         service = LookupService(
             LookupClient(self._config.lookup_url),
             GenerateClient(self._config.lookup_url),
+            CheckClient(self._config.lookup_url),
         )
+        service.checked.connect(self._on_check_finished)
+        service.check_failed.connect(self._on_check_failed)
         service.finished.connect(self._on_lookup_finished)
         service.failed.connect(self._on_lookup_failed)
         service.probed.connect(self._on_lookup_probed)

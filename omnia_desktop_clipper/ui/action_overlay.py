@@ -1,18 +1,24 @@
 """The floating action pill shown near the cursor after a text-selection gesture.
 
-Evolves the single floating "+" into a two-button pill: **+** (add to Anki, unchanged) and
-**⌕** (look the word up in the collection). The window mechanics are the load-bearing part and
-are unchanged from the original overlay: frameless, always-on-top, shown WITHOUT activating so
-the source app keeps its selection, and promoted to a status-level all-spaces panel on macOS so
-it appears over whatever app is in front.
+Three buttons now: **+** (add to Anki), **⌕** (look the word up in the collection) and the
+**wand** (check the phrase for mistakes). The window mechanics are the load-bearing part and are
+unchanged from the original single-"+" overlay: frameless, always-on-top, shown WITHOUT
+activating so the source app keeps its selection, and promoted to a status-level all-spaces
+panel on macOS so it appears over whatever app is in front.
 
-Two additions make two buttons better than one rather than worse:
+Three things make the extra buttons better than one rather than worse:
 
 * the magnifier reports what a lookup would find BEFORE it is clicked — a count badge when the
   word is already in the collection, a muted glyph and "not in your collection" tooltip when it
   is not. That answers the common question without any click at all;
-* the auto-hide is longer with two targets, and pauses while the pointer is over the pill, so
-  aiming at the second button never races the timer.
+* the wand is a WAND, not a tick: the button means "make this better", where a tick would read
+  as "this is correct" — the opposite of why anyone presses it;
+* the auto-hide is longer with more targets, and pauses while the pointer is over the pill, so
+  aiming at the third button never races the timer.
+
+The pill's width is DERIVED from the buttons actually on it. A hard-coded width tuned for two
+put most of a third one past the right edge of the screen, where a frameless always-on-top
+window is clipped rather than scrollable-to.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from typing import Optional
 from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
-from .icon import search_icon
+from .icon import search_icon, wand_icon
 from .macos_window import promote_over_all_apps
 
 _AUTO_HIDE_MS = 4000  # two targets need more aiming time than the original single "+"
@@ -51,6 +57,12 @@ _BADGE_QSS = (
     "QLabel { background:#22a06b; color:white; border-radius:7px;"
     " font-size:9px; font-weight:bold; padding:0 3px; }"
 )
+# Green, matching the correction panel it opens — and distinct from the magnifier's grey, so
+# which button was pressed is obvious from what appears.
+_CHECK_QSS = (
+    "QPushButton { background:#1f9d63; border:none; border-radius:11px; padding:0; }"
+    "QPushButton:hover { background:#17804f; }"
+)
 
 
 class ActionOverlay(QWidget):
@@ -60,6 +72,7 @@ class ActionOverlay(QWidget):
         self,
         on_add: Callable[[], None],
         on_lookup: Optional[Callable[[], None]] = None,
+        on_check: Optional[Callable[[], None]] = None,
     ) -> None:
         """Build the overlay.
 
@@ -68,6 +81,9 @@ class ActionOverlay(QWidget):
             on_lookup: Called when the magnifier is clicked. ``None`` hides that button, which
                 reduces the pill to exactly the original single-"+" overlay. Pass the callback
                 and use :meth:`set_lookup_enabled` when the button must toggle at runtime.
+            on_check: Called when the wand is clicked. ``None`` hides that button. Gated on the
+                same switch as the magnifier — both are the lookup service on one socket, so if
+                that is off there is nothing for either to talk to.
         """
         super().__init__(
             None,
@@ -77,6 +93,7 @@ class ActionOverlay(QWidget):
         )
         self._on_add = on_add
         self._on_lookup = on_lookup
+        self._on_check = on_check
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         # Show without activating so the focused app keeps its selection for the capture.
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -107,6 +124,18 @@ class ActionOverlay(QWidget):
         self._lookup_button.setVisible(self._lookup_visible)
         layout.addWidget(self._lookup_button)
 
+        self._check_button = QPushButton(self)
+        self._check_button.setFixedSize(_BUTTON, _BUTTON)
+        self._check_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._check_button.setIcon(wand_icon())
+        self._check_button.setIconSize(QSize(14, 14))
+        self._check_button.setStyleSheet(_CHECK_QSS)
+        self._check_button.setToolTip("Check this phrase for mistakes (Omnia)")
+        self._check_button.clicked.connect(self._handle_check)
+        self._check_visible = on_check is not None
+        self._check_button.setVisible(self._check_visible)
+        layout.addWidget(self._check_button)
+
         # Match count badge, parented to the lookup button so it rides along.
         self._badge = QLabel(self._lookup_button)
         self._badge.setStyleSheet(_BADGE_QSS)
@@ -121,17 +150,33 @@ class ActionOverlay(QWidget):
         self._hide_timer.timeout.connect(self.hide)
 
     def set_lookup_enabled(self, enabled: bool) -> None:
-        """Show or hide the magnifier (Settings can toggle it while the app runs)."""
+        """Show or hide the magnifier AND the wand (Settings toggles both while the app runs).
+
+        One switch for both, because they are one service: the wand POSTs to the same loopback
+        port the magnifier reads from, so "Word Lookup off" leaves neither anything to talk to.
+        Whether Phrase Check itself is on is omnia's to answer — it says so in a sentence naming
+        the toggle, which is more use than a button that quietly is not there.
+        """
         self._lookup_visible = enabled and self._on_lookup is not None
         self._lookup_button.setVisible(self._lookup_visible)
+        self._check_visible = enabled and self._on_check is not None
+        self._check_button.setVisible(self._check_visible)
         self._resize_to_content()
 
     # -- geometry ------------------------------------------------------------------------
 
+    def button_count(self) -> int:
+        """How many buttons the pill is currently showing."""
+        return 1 + int(self._lookup_visible) + int(self._check_visible)
+
     def _resize_to_content(self) -> None:
-        """Pin the pill to exactly its buttons (never a stray default-sized window)."""
-        buttons = 2 if self._lookup_visible else 1
-        width = _PAD * 2 + buttons * _BUTTON + (_GAP if buttons > 1 else 0)
+        """Pin the pill to exactly its buttons (never a stray default-sized window).
+
+        Derived, not a constant per shape: a width tuned for two buttons left most of a third
+        past the screen edge, and a fourth would do it again.
+        """
+        buttons = self.button_count()
+        width = _PAD * 2 + buttons * _BUTTON + _GAP * max(0, buttons - 1)
         self.setFixedSize(width, _PAD * 2 + _BUTTON)
 
     def show_at(self, x: int, y: int) -> None:
@@ -140,7 +185,9 @@ class ActionOverlay(QWidget):
         self.move(x + _CURSOR_OFFSET, y + _CURSOR_OFFSET)
         self.show()
         self.raise_()
-        promote_over_all_apps(self)  # float above the frontmost app, without stealing focus
+        promote_over_all_apps(
+            self
+        )  # float above the frontmost app, without stealing focus
         self._hide_timer.start(_AUTO_HIDE_MS)
 
     # -- lookup hinting ------------------------------------------------------------------
@@ -161,7 +208,9 @@ class ActionOverlay(QWidget):
             return
         if count <= 0:
             self._lookup_button.setStyleSheet(_LOOKUP_EMPTY_QSS)
-            self._lookup_button.setToolTip(f"No card for {quoted} yet — click to confirm")
+            self._lookup_button.setToolTip(
+                f"No card for {quoted} yet — click to confirm"
+            )
             self._badge.hide()
             return
         self._lookup_button.setStyleSheet(_LOOKUP_QSS)
@@ -195,6 +244,11 @@ class ActionOverlay(QWidget):
         self._dismiss()
         if self._on_lookup is not None:
             self._on_lookup()
+
+    def _handle_check(self) -> None:
+        self._dismiss()
+        if self._on_check is not None:
+            self._on_check()
 
     def _dismiss(self) -> None:
         """Hide immediately and clear any hint state for the next gesture."""
