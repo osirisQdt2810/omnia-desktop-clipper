@@ -39,7 +39,7 @@ _ANSWER = {
 }
 
 
-def _client(answer=None, seen=None, token="tok"):
+def _client(answer=None, seen=None):
     """A client whose transport records the call and replies with ``answer``."""
 
     def transport(url, body, headers):
@@ -47,9 +47,7 @@ def _client(answer=None, seen=None, token="tok"):
             seen.append({"url": url, "body": body, "headers": headers})
         return {} if answer is None else answer
 
-    return GenerateClient(
-        "http://127.0.0.1:8766", token_provider=lambda: token, transport=transport
-    )
+    return GenerateClient("http://127.0.0.1:8766", transport=transport)
 
 
 class TestTheRequest:
@@ -71,49 +69,18 @@ class TestTheRequest:
 
         assert seen[0]["body"]["fields"] is None
 
-    def test_the_token_travels_in_its_own_header(self) -> None:
+    def test_it_asks_for_json_and_nothing_else(self) -> None:
+        """No credential of any kind travels: the socket is loopback and the add-on does not
+        authenticate. A header nobody reads is dead weight the next reader mistakes for auth."""
         seen: list[dict] = []
-        _client(_ANSWER, seen, token="s3cret").generate(123)
+        _client(_ANSWER, seen).generate(123)
 
-        assert seen[0]["headers"]["X-Omnia-Token"] == "s3cret"
-        assert seen[0]["headers"]["Content-Type"] == "application/json"
-
-    def test_the_token_is_read_per_request(self) -> None:
-        """The add-on is often installed AFTER the clipper started; a token cached at startup
-        would then be empty for the rest of the session and every generate would 401."""
-        tokens = iter(["", "written-later"])
-        seen: list[dict] = []
-
-        client = GenerateClient(
-            "http://h:1",
-            token_provider=lambda: next(tokens),
-            transport=lambda url, body, headers: seen.append(headers) or _ANSWER,
-        )
-        with pytest.raises(GenerateError):
-            client.generate(123)  # nothing written yet
-
-        client.generate(123)
-
-        assert seen[0]["X-Omnia-Token"] == "written-later"
-
-    def test_without_a_token_it_does_not_even_ask(self) -> None:
-        """A pointless 401 teaches the user nothing; naming the missing file does."""
-        asked: list[str] = []
-        client = GenerateClient(
-            "http://h:1",
-            token_provider=lambda: "",
-            transport=lambda url, body, headers: asked.append(url) or _ANSWER,
-        )
-
-        with pytest.raises(GenerateError, match="token"):
-            client.generate(123)
-        assert asked == []
+        assert seen[0]["headers"] == {"Content-Type": "application/json"}
 
     def test_the_base_url_trailing_slash_is_normalised(self) -> None:
         seen: list[dict] = []
         GenerateClient(
             "http://h:1/",
-            token_provider=lambda: "t",
             transport=lambda url, body, headers: seen.append({"url": url}) or _ANSWER,
         ).generate(1)
 
@@ -212,7 +179,7 @@ class TestTheAnswer:
 
     def test_a_non_dict_payload_is_an_error(self) -> None:
         client = GenerateClient(
-            "http://h:1", token_provider=lambda: "t", transport=lambda *a: ["nope"]
+            "http://h:1", transport=lambda *a: ["nope"]
         )
         with pytest.raises(GenerateError):
             client.generate(1)
@@ -307,8 +274,16 @@ class TestHttpFailures:
     def test_409_explains_which_option_to_switch_on(self) -> None:
         assert "Regenerate from clippers" in error_message(409)
 
-    def test_401_points_at_the_token(self) -> None:
-        assert "token" in error_message(401).lower()
+    def test_401_names_both_things_it_can_mean(self) -> None:
+        """Nothing here authenticates any more, so a 401 means one of two things and the
+        message has to carry both: something that is not Omnia is on that port, or the add-on
+        is older than this clipper and still wants a token that no longer exists. Sending the
+        user to change a URL that was right is how the old message wasted their afternoon."""
+        message = error_message(401)
+
+        assert "port" in message.lower()
+        assert "out of date" in message.lower() or "older" in message.lower()
+        assert "token" not in message.lower(), "there is no token to enter any more"
 
     def test_503_points_at_smart_notes(self) -> None:
         assert "Smart Notes" in error_message(503)
@@ -347,7 +322,7 @@ class TestAgainstARealServer:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
-    def test_a_real_post_carries_the_token_and_the_body(self) -> None:
+    def test_a_real_post_carries_the_body_and_no_credential(self) -> None:
         seen = {}
 
         def respond(request):
@@ -363,14 +338,12 @@ class TestAgainstARealServer:
 
         server = self._serving(respond)
         try:
-            client = GenerateClient(
-                f"http://127.0.0.1:{server.server_port}", token_provider=lambda: "abc"
-            )
+            client = GenerateClient(f"http://127.0.0.1:{server.server_port}")
             outcome = client.generate(123, ["Definition"])
         finally:
             server.shutdown()
 
-        assert seen["token"] == "abc"
+        assert seen["token"] is None, "a credential reached the wire"
         assert seen["type"] == "application/json"
         assert seen["body"] == {
             "client": "desktop_clipper",
@@ -392,9 +365,7 @@ class TestAgainstARealServer:
 
         server = self._serving(respond)
         try:
-            client = GenerateClient(
-                f"http://127.0.0.1:{server.server_port}", token_provider=lambda: "abc"
-            )
+            client = GenerateClient(f"http://127.0.0.1:{server.server_port}")
             with pytest.raises(GenerateError, match="Regenerate from clippers"):
                 client.generate(123)
         finally:
@@ -407,9 +378,7 @@ class TestAgainstARealServer:
             probe.bind(("127.0.0.1", 0))
             dead = probe.getsockname()[1]
 
-        client = GenerateClient(
-            f"http://127.0.0.1:{dead}", token_provider=lambda: "abc"
-        )
+        client = GenerateClient(f"http://127.0.0.1:{dead}")
         with pytest.raises(GenerateError, match="Is Anki running"):
             client.generate(123)
 
