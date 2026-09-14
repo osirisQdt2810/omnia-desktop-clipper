@@ -9,7 +9,9 @@ from __future__ import annotations
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 
-_BRAND_BLUE = "#2d6cdf"  # the Omnia clipper mark blue (matches omnia-web-clipper icon.svg)
+_BRAND_BLUE = (
+    "#2d6cdf"  # the Omnia clipper mark blue (matches omnia-web-clipper icon.svg)
+)
 
 
 def plus_pixmap(size: int = 128) -> QPixmap:
@@ -80,4 +82,52 @@ def search_icon(color: str = "#ffffff") -> QIcon:
     icon = QIcon()
     for size in (16, 32, 64, 128):
         icon.addPixmap(search_pixmap(size, color))
+    return icon
+
+
+def wand_pixmap(size: int = 128, color: str = "#ffffff") -> QPixmap:
+    """Render a wand-with-sparkles glyph at ``size`` px on a transparent background.
+
+    A wand, not a tick. The button means "make this better"; a tick would read as "this is
+    correct", which is the opposite of why anyone presses it.
+
+    Same stroke proportions as :func:`plus_pixmap` and :func:`search_pixmap` (11% of the side,
+    round caps) so all three overlay buttons read as one set. Only the glyph is drawn — the
+    caller supplies the button's circular fill.
+
+    Args:
+        size: Pixel size of the square pixmap.
+        color: Stroke colour of the glyph.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(size * 0.11)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    # The wand: one diagonal from the lower-left to just past the middle.
+    painter.drawLine(
+        QPointF(size * 0.16, size * 0.84), QPointF(size * 0.60, size * 0.40)
+    )
+    # The sparkle at its tip: a four-pointed star, drawn as two short crossed strokes. Thinner
+    # than the wand so the tip reads as a glint rather than as a second handle.
+    sparkle = QPen(QColor(color))
+    sparkle.setWidthF(size * 0.085)
+    sparkle.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(sparkle)
+    tip_x, tip_y, arm = size * 0.72, size * 0.28, size * 0.15
+    painter.drawLine(QPointF(tip_x, tip_y - arm), QPointF(tip_x, tip_y + arm))
+    painter.drawLine(QPointF(tip_x - arm, tip_y), QPointF(tip_x + arm, tip_y))
+    painter.end()
+    return pixmap
+
+
+def wand_icon(color: str = "#ffffff") -> QIcon:
+    """Return the wand icon used by the phrase-check button."""
+    icon = QIcon()
+    for size in (16, 32, 64, 128):
+        icon.addPixmap(wand_pixmap(size, color))
     return icon

@@ -81,6 +81,7 @@ _HTTP_HINTS = {
     503: "Smart Notes is not available right now — is it enabled, and is Anki idle?",
 }
 
+
 class GenerateError(Exception):
     """The generation could not run at all (message is user-facing).
 
@@ -216,7 +217,7 @@ def _urllib_transport(
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise GenerateError(error_message(exc.code, _error_body(exc))) from exc
+        raise GenerateError(error_message(exc.code, error_body(exc))) from exc
     except urllib.error.URLError as exc:
         host = url.rsplit(_GENERATE_PATH, 1)[0]
         raise GenerateError(
@@ -236,8 +237,12 @@ def _urllib_transport(
     return payload
 
 
-def _error_body(exc: urllib.error.HTTPError) -> str:
-    """Read an error response's ``{"error": …}``, or ``""`` when there is none."""
+def error_body(exc: urllib.error.HTTPError) -> str:
+    """Read an error response's ``{"error": …}``, or ``""`` when there is none.
+
+    Public because :mod:`omnia_desktop_clipper.lookup.check` POSTs to the same service and gets
+    the same error shape back. One reader of that shape, not two that can drift.
+    """
     try:
         body = json.loads(exc.read().decode("utf-8"))
     except Exception:

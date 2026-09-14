@@ -1,18 +1,24 @@
 """The floating action pill shown near the cursor after a text-selection gesture.
 
-Evolves the single floating "+" into a two-button pill: **+** (add to Anki, unchanged) and
-**⌕** (look the word up in the collection). The window mechanics are the load-bearing part and
-are unchanged from the original overlay: frameless, always-on-top, shown WITHOUT activating so
-the source app keeps its selection, and promoted to a status-level all-spaces panel on macOS so
-it appears over whatever app is in front.
+Three buttons now: **+** (add to Anki), **⌕** (look the word up in the collection) and the
+**wand** (check the phrase for mistakes). The window mechanics are the load-bearing part and are
+unchanged from the original single-"+" overlay: frameless, always-on-top, shown WITHOUT
+activating so the source app keeps its selection, and promoted to a status-level all-spaces
+panel on macOS so it appears over whatever app is in front.
 
-Two additions make two buttons better than one rather than worse:
+Three things make the extra buttons better than one rather than worse:
 
 * the magnifier reports what a lookup would find BEFORE it is clicked — a count badge when the
   word is already in the collection, a muted glyph and "not in your collection" tooltip when it
   is not. That answers the common question without any click at all;
-* the auto-hide is longer with two targets, and pauses while the pointer is over the pill, so
-  aiming at the second button never races the timer.
+* the wand is a WAND, not a tick: the button means "make this better", where a tick would read
+  as "this is correct" — the opposite of why anyone presses it;
+* the auto-hide is longer with more targets, and pauses while the pointer is over the pill, so
+  aiming at the third button never races the timer.
+
+The pill's width is DERIVED from the buttons actually on it. A hard-coded width tuned for two
+put most of a third one past the right edge of the screen, where a frameless always-on-top
+window is clipped rather than scrollable-to.
 """
 
 from __future__ import annotations
@@ -20,18 +26,27 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtCore import QPoint, QSize, Qt, QTimer
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
-from .icon import search_icon
+from . import pill_geometry
+from .icon import search_icon, wand_icon
 from .macos_window import promote_over_all_apps
 
-_AUTO_HIDE_MS = 4000  # two targets need more aiming time than the original single "+"
+# Three targets need more aiming time than the original single "+", and the timer pauses while
+# the pointer is over the pill, so the extra button never races it. Unchanged when the third
+# button arrived: four seconds was already generous for two, and the pause-on-hover is what
+# actually carries the aiming — a longer blind timer would only leave a stale pill on screen.
+_AUTO_HIDE_MS = 4000
 _AUTO_HIDE_AFTER_LEAVE_MS = 1200
-_CURSOR_OFFSET = 12  # px down-right of the cursor, so the pill isn't under the pointer
-_BUTTON = 22
-_GAP = 4
-_PAD = 3
+# The geometry lives in pill_geometry, which has no Qt in it and is therefore checked on every
+# platform on every run -- including the ones where a QApplication cannot be built. That is not
+# tidiness: the screen-edge rule is the thing that has now broken twice.
+_CURSOR_OFFSET = pill_geometry.CURSOR_OFFSET
+_BUTTON = pill_geometry.BUTTON_PX
+_GAP = pill_geometry.GAP_PX
+_PAD = pill_geometry.PAD_PX
 
 _ADD_QSS = (
     "QPushButton { background:#2f81f7; color:white; border:none; border-radius:11px;"
@@ -51,6 +66,12 @@ _BADGE_QSS = (
     "QLabel { background:#22a06b; color:white; border-radius:7px;"
     " font-size:9px; font-weight:bold; padding:0 3px; }"
 )
+# Green, matching the correction panel it opens — and distinct from the magnifier's grey, so
+# which button was pressed is obvious from what appears.
+_CHECK_QSS = (
+    "QPushButton { background:#1f9d63; border:none; border-radius:11px; padding:0; }"
+    "QPushButton:hover { background:#17804f; }"
+)
 
 
 class ActionOverlay(QWidget):
@@ -60,6 +81,7 @@ class ActionOverlay(QWidget):
         self,
         on_add: Callable[[], None],
         on_lookup: Optional[Callable[[], None]] = None,
+        on_check: Optional[Callable[[], None]] = None,
     ) -> None:
         """Build the overlay.
 
@@ -68,6 +90,9 @@ class ActionOverlay(QWidget):
             on_lookup: Called when the magnifier is clicked. ``None`` hides that button, which
                 reduces the pill to exactly the original single-"+" overlay. Pass the callback
                 and use :meth:`set_lookup_enabled` when the button must toggle at runtime.
+            on_check: Called when the wand is clicked. ``None`` hides that button. Gated on the
+                same switch as the magnifier — both are the lookup service on one socket, so if
+                that is off there is nothing for either to talk to.
         """
         super().__init__(
             None,
@@ -77,6 +102,7 @@ class ActionOverlay(QWidget):
         )
         self._on_add = on_add
         self._on_lookup = on_lookup
+        self._on_check = on_check
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         # Show without activating so the focused app keeps its selection for the capture.
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -107,6 +133,18 @@ class ActionOverlay(QWidget):
         self._lookup_button.setVisible(self._lookup_visible)
         layout.addWidget(self._lookup_button)
 
+        self._check_button = QPushButton(self)
+        self._check_button.setFixedSize(_BUTTON, _BUTTON)
+        self._check_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._check_button.setIcon(wand_icon())
+        self._check_button.setIconSize(QSize(14, 14))
+        self._check_button.setStyleSheet(_CHECK_QSS)
+        self._check_button.setToolTip("Check this phrase for mistakes (Omnia)")
+        self._check_button.clicked.connect(self._handle_check)
+        self._check_visible = on_check is not None
+        self._check_button.setVisible(self._check_visible)
+        layout.addWidget(self._check_button)
+
         # Match count badge, parented to the lookup button so it rides along.
         self._badge = QLabel(self._lookup_button)
         self._badge.setStyleSheet(_BADGE_QSS)
@@ -121,27 +159,74 @@ class ActionOverlay(QWidget):
         self._hide_timer.timeout.connect(self.hide)
 
     def set_lookup_enabled(self, enabled: bool) -> None:
-        """Show or hide the magnifier (Settings can toggle it while the app runs)."""
+        """Show or hide the magnifier AND the wand (Settings toggles both while the app runs).
+
+        One switch for both, because they are one service: the wand POSTs to the same loopback
+        port the magnifier reads from, so "Word Lookup off" leaves neither anything to talk to.
+        Whether Phrase Check itself is on is omnia's to answer — it says so in a sentence naming
+        the toggle, which is more use than a button that quietly is not there.
+        """
         self._lookup_visible = enabled and self._on_lookup is not None
         self._lookup_button.setVisible(self._lookup_visible)
+        self._check_visible = enabled and self._on_check is not None
+        self._check_button.setVisible(self._check_visible)
         self._resize_to_content()
 
     # -- geometry ------------------------------------------------------------------------
 
+    def button_count(self) -> int:
+        """How many buttons the pill is currently showing."""
+        return 1 + int(self._lookup_visible) + int(self._check_visible)
+
     def _resize_to_content(self) -> None:
         """Pin the pill to exactly its buttons (never a stray default-sized window)."""
-        buttons = 2 if self._lookup_visible else 1
-        width = _PAD * 2 + buttons * _BUTTON + (_GAP if buttons > 1 else 0)
-        self.setFixedSize(width, _PAD * 2 + _BUTTON)
+        self.setFixedSize(
+            pill_geometry.pill_width(self.button_count()), pill_geometry.pill_height()
+        )
 
     def show_at(self, x: int, y: int) -> None:
-        """Show the pill just down-right of screen ``(x, y)``, auto-hiding after a delay."""
+        """Show the pill just down-right of screen ``(x, y)``, auto-hiding after a delay.
+
+        Clamped to the screen, which it was NOT before. The pill grew from 54px to 80px with the
+        third button, so a selection near the right edge put the wand — the new one — entirely
+        past the edge, where a frameless always-on-top window is clipped rather than
+        scrollable-to. A right-hand column is a common place to be selecting text.
+        """
         self._resize_to_content()
-        self.move(x + _CURSOR_OFFSET, y + _CURSOR_OFFSET)
+        self.move(*self._placement(x, y))
         self.show()
         self.raise_()
-        promote_over_all_apps(self)  # float above the frontmost app, without stealing focus
+        promote_over_all_apps(
+            self
+        )  # float above the frontmost app, without stealing focus
         self._hide_timer.start(_AUTO_HIDE_MS)
+
+    def _placement(self, x: int, y: int) -> tuple[int, int]:
+        """Where to put the pill for a gesture at ``(x, y)``, kept on screen.
+
+        The arithmetic is in :mod:`omnia_desktop_clipper.ui.pill_geometry`; this half only asks
+        Qt which screen the pointer is on. A pointer on no screen at all (it happens between
+        displays) falls back to the primary one, and then to the unclamped position rather than
+        to nothing.
+        """
+        screen = (
+            QGuiApplication.screenAt(QPoint(x, y)) or QGuiApplication.primaryScreen()
+        )
+        if screen is None:  # pragma: no cover - no screens at all
+            return x + _CURSOR_OFFSET, y + _CURSOR_OFFSET
+        area = screen.availableGeometry()
+        return pill_geometry.place(
+            x,
+            y,
+            self.width(),
+            self.height(),
+            pill_geometry.Area(
+                left=area.left(),
+                top=area.top(),
+                right=area.right(),
+                bottom=area.bottom(),
+            ),
+        )
 
     # -- lookup hinting ------------------------------------------------------------------
 
@@ -161,7 +246,9 @@ class ActionOverlay(QWidget):
             return
         if count <= 0:
             self._lookup_button.setStyleSheet(_LOOKUP_EMPTY_QSS)
-            self._lookup_button.setToolTip(f"No card for {quoted} yet — click to confirm")
+            self._lookup_button.setToolTip(
+                f"No card for {quoted} yet — click to confirm"
+            )
             self._badge.hide()
             return
         self._lookup_button.setStyleSheet(_LOOKUP_QSS)
@@ -195,6 +282,11 @@ class ActionOverlay(QWidget):
         self._dismiss()
         if self._on_lookup is not None:
             self._on_lookup()
+
+    def _handle_check(self) -> None:
+        self._dismiss()
+        if self._on_check is not None:
+            self._on_check()
 
     def _dismiss(self) -> None:
         """Hide immediately and clear any hint state for the next gesture."""

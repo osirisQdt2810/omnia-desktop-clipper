@@ -14,6 +14,9 @@ Three behaviours matter beyond "don't block":
 * **Regeneration.** The same service, a different route: slow, mutating, and answered
   field by field. It gets its own guard, because several fields regenerating at once are all
   still wanted — what makes them stale is a lookup for ANOTHER word, not each other.
+* **Phrase checking.** A third route, and the one with the sharpest staleness rule: the
+  register toggle re-asks for the SAME phrase, so two answers for one selection can be in
+  flight at once. Only the latest is wanted, which is what its own guard is for.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .check import CheckClient, CheckError
 from .client import LookupClient, LookupUnavailableError, LookupView
 from .generate import GenerateClient, GenerateError
 from .guard import GenerationGuard
@@ -51,30 +55,48 @@ class LookupService(QObject):
     # (note_id, message, requested field names) — the regeneration could not run at all.
     # The names travel with it so a failure clears only the fields THIS request asked for.
     generate_failed = pyqtSignal("qint64", str, object)
+    # (phrase, Correction, ticket) — a completed phrase check, on the Qt main thread.
+    #
+    # The ticket is the CALLER's, carried through untouched. The panel starts requests of its
+    # own (the register toggle), so it is the only thing that knows which answer it is waiting
+    # for; a ticket the app looked up when the answer arrived would always be the latest one and
+    # the comparison could never fail.
+    checked = pyqtSignal(str, object, int)
+    # (phrase, message, ticket) — the check could not run. The message is shown as-is.
+    check_failed = pyqtSignal(str, str, int)
 
     def __init__(
-        self, client: LookupClient, generator: Optional[GenerateClient] = None
+        self,
+        client: LookupClient,
+        generator: Optional[GenerateClient] = None,
+        checker: Optional[CheckClient] = None,
     ) -> None:
-        """Wrap ``client`` (and, when regeneration is available, ``generator``) in threads.
+        """Wrap ``client`` (and the write clients, when available) in threads.
 
         Args:
             client: The read-only lookup/media client.
             generator: The mutating ``/generate`` client. ``None`` disables regeneration.
+            checker: The ``/check`` client. ``None`` disables phrase checking.
         """
         super().__init__()
         self._client = client
         self._generator = generator
+        self._checker = checker
         self._lookups = GenerationGuard()
         self._regenerations = GenerationGuard()
+        self._checks = GenerationGuard()
 
     def _next_generation(self) -> int:
         """Start a new LOOKUP, superseding the previous one AND any regeneration in flight.
 
         A regeneration is only wanted while its note is the one the user is looking at, and a
-        new lookup is precisely the moment they stop looking at it. ``probe`` deliberately does
-        NOT come through here — see its docstring.
+        new lookup is precisely the moment they stop looking at it. The same goes for a check:
+        it is an answer about the text that WAS selected, and left to land over a new selection
+        it is not stale decoration but a wrong answer to the question on screen. ``probe``
+        deliberately does NOT come through here — see its docstring.
         """
         self._regenerations.invalidate()
+        self._checks.invalidate()
         return self._lookups.invalidate()
 
     def _is_current(self, generation: int) -> bool:
@@ -170,6 +192,64 @@ class LookupService(QObject):
                 self.generated.emit(note_id, outcome)
 
         self._spawn(work, name="omnia-generate")
+
+    def cancel_check(self) -> None:
+        """Abandon a check in flight, without starting one.
+
+        Called when the panel it would have drawn into is dismissed. Without it the answer is
+        still "current" when it lands, and :meth:`CorrectionPanel._present` shows, raises and
+        ACTIVATES the panel unconditionally — so a correction for a phrase the user left behind
+        pops back onto the screen and takes keyboard focus from whatever they are now typing in.
+
+        A probe deliberately does not do this (see :meth:`probe`), and it is the only thing a new
+        selection fires, which is why the dismissal has to say so itself.
+        """
+        self._checks.invalidate()
+
+    def check(
+        self, text: str, mode: str = "", refresh: bool = False, ticket: int = 0
+    ) -> None:
+        """Correct ``text`` in the background; emits :attr:`checked` or :attr:`check_failed`.
+
+        Unlike a regeneration this DOES supersede its predecessors. The register toggle re-asks
+        for the same phrase, so two answers for one selection can be in flight at once, and the
+        slow first one may land long after the user switched — silently reverting the panel and
+        flipping the toggle back under them. Only the latest is ever wanted.
+
+        Args:
+            text: The selected phrase.
+            mode: ``"written"``, ``"spoken"``, or empty for whatever omnia is set to.
+            refresh: True to ignore omnia's remembered answer and ask again.
+            ticket: The caller's own token, echoed back with the answer. Opaque here.
+        """
+        phrase = (text or "").strip()
+        if not phrase:
+            return
+        if self._checker is None:
+            self.check_failed.emit(
+                phrase, "Checking a phrase is not available in this build.", ticket
+            )
+            return
+        generation = self._checks.invalidate()
+        checker = self._checker
+
+        def work() -> None:
+            try:
+                correction = checker.check(phrase, mode, refresh)
+            except CheckError as exc:
+                if self._checks.is_current(generation):
+                    self.check_failed.emit(phrase, str(exc), ticket)
+                return
+            except Exception:
+                if self._checks.is_current(generation):
+                    self.check_failed.emit(
+                        phrase, "The check failed unexpectedly.", ticket
+                    )
+                return
+            if self._checks.is_current(generation):
+                self.checked.emit(phrase, correction, ticket)
+
+        self._spawn(work, name="omnia-check")
 
     def media(self, filename: str) -> bytes | None:
         """Return a collection-media file's bytes from omnia, or ``None``.

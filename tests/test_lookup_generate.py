@@ -71,7 +71,8 @@ class TestTheRequest:
 
     def test_it_asks_for_json_and_nothing_else(self) -> None:
         """No credential of any kind travels: the socket is loopback and the add-on does not
-        authenticate. A header nobody reads is dead weight the next reader mistakes for auth."""
+        authenticate. A header nobody reads is dead weight the next reader mistakes for auth.
+        """
         seen: list[dict] = []
         _client(_ANSWER, seen).generate(123)
 
@@ -178,9 +179,7 @@ class TestTheAnswer:
         assert outcome.fields == ("F",)
 
     def test_a_non_dict_payload_is_an_error(self) -> None:
-        client = GenerateClient(
-            "http://h:1", transport=lambda *a: ["nope"]
-        )
+        client = GenerateClient("http://h:1", transport=lambda *a: ["nope"])
         with pytest.raises(GenerateError):
             client.generate(1)
 
@@ -278,7 +277,8 @@ class TestHttpFailures:
         """Nothing here authenticates any more, so a 401 means one of two things and the
         message has to carry both: something that is not Omnia is on that port, or the add-on
         is older than this clipper and still wants a token that no longer exists. Sending the
-        user to change a URL that was right is how the old message wasted their afternoon."""
+        user to change a URL that was right is how the old message wasted their afternoon.
+        """
         message = error_message(401)
 
         assert "port" in message.lower()
