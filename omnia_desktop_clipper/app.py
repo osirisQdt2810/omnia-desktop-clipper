@@ -36,7 +36,6 @@ from .hotkey import GlobalHotkey
 from .lookup.client import LookupClient
 from .lookup.generate import GenerateClient
 from .lookup.service import LookupService
-from .lookup.token import resolve_token
 from .mouse_watcher import GlobalMouseWatcher
 from .ui.action_overlay import ActionOverlay
 from .ui.icon import plus_icon
@@ -553,7 +552,6 @@ class ClipperApp(QObject):
                 # A lambda, not the token itself: it is read per request, so a token omnia
                 # wrote (or rotated) after the clipper started is still found, and a token
                 # typed into Settings takes effect without a restart.
-                token_provider=lambda: resolve_token(self._config.lookup_token),
             ),
         )
         service.finished.connect(self._on_lookup_finished)

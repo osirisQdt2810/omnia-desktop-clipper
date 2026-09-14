@@ -26,7 +26,6 @@ from .generate import (
 )
 from .guard import GenerationGuard
 from .regeneration import ControlState, RegenerationState
-from .token import resolve_token
 
 __all__ = [
     "CLIENT_NAME",
@@ -42,5 +41,4 @@ __all__ = [
     "LookupUnavailableError",
     "LookupView",
     "RegenerationState",
-    "resolve_token",
 ]

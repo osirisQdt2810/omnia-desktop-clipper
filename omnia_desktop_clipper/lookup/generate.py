@@ -9,7 +9,7 @@ Three things separate it from :mod:`omnia_desktop_clipper.lookup.client`:
 
 * **It mutates.** The request rewrites notes and spends the user's LLM/TTS credits, so it is
   authenticated with the shared secret omnia writes into its add-on data (see
-  :mod:`omnia_desktop_clipper.lookup.token`).
+  the lookup service).
 * **It is slow.** Generation calls a provider; tens of seconds is normal. The lookup's 4 s
   deadline would time out every real request, so this has its own generous one — and its
   caller must be off the Qt main thread (see :class:`~omnia_desktop_clipper.lookup.service.LookupService`).
@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .client import CLIENT_NAME, LookupCardView, LookupFieldView
-from .token import resolve_token
 
 # Generous on purpose: an LLM field plus a TTS clip regularly takes half a minute, and a whole
 # note asks for several of them in one request. The cost of being too patient is a spinner; the
@@ -67,28 +66,23 @@ _STATUS_HINTS = {
 _HTTP_HINTS = {
     400: "Anki did not understand the request.",
     401: (
-        "Anki rejected this app's token.\n"
-        "Restart Anki so Omnia writes a fresh one, or paste it into "
-        "Settings → Lookup token."
+        # Omnia no longer authenticates this endpoint, so a 401 means something ELSE is on that
+        # port — naming a token the add-on has not asked for since would send the reader to a
+        # setting that no longer exists.
+        "Something other than Omnia answered on that port. Check the lookup service address "
+        "in Settings."
     ),
     403: "Anki refused the request.",
     409: "Switch on Smart Notes → “Regenerate from clippers” in Anki to allow this.",
     503: "Smart Notes is not available right now — is it enabled, and is Anki idle?",
 }
 
-_NO_TOKEN = (
-    "Couldn't find Omnia's clipper token.\n"
-    "• Is the Omnia add-on installed, and has Anki been started since?\n"
-    "• Otherwise paste the token into Settings → Lookup token."
-)
-
-
 class GenerateError(Exception):
     """The generation could not run at all (message is user-facing).
 
     A field that merely came back ``blocked`` or ``no_rule`` is NOT this — that is a normal
-    result carrying a reason. This is "the request never happened": no token, Anki closed, the
-    option switched off, a malformed answer.
+    result carrying a reason. This is "the request never happened": Anki closed, the option
+    switched off, a malformed answer.
     """
 
 
@@ -106,7 +100,8 @@ def error_message(status_code: int, service_error: str = "") -> str:
 
     The service's own ``{"error": …}`` wins when it sends one — it knows more than a status
     code does. The fallbacks exist because the two interesting failures (409 "the option is
-    off", 401 "bad token") are only actionable if somebody says what to switch on.
+    off", 503 "Smart Notes is not available") are only actionable if somebody says what to
+    switch on.
     """
     message = service_error.strip()
     if message:
@@ -252,22 +247,14 @@ class GenerateClient:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:8766",
-        token_provider: Optional[Callable[[], str]] = None,
         transport: Optional[Transport] = None,
     ) -> None:
         """Initialise the client.
 
         Args:
             base_url: Where omnia's lookup service listens (the same URL the lookups use).
-            token_provider: Returns the shared secret, called PER REQUEST so a token written
-                after the clipper started is still found. Defaults to discovering it in
-                Anki's add-on data.
-            transport: The HTTP call (injected in tests). Defaults to a stdlib POST.
         """
         self._base_url = base_url.rstrip("/")
-        self._token_provider = (
-            token_provider if token_provider is not None else resolve_token
-        )
         self._transport = transport if transport is not None else _urllib_transport
 
     def generate(
@@ -278,12 +265,9 @@ class GenerateClient:
         Blocking, and slow by nature — call it from a worker thread.
 
         Raises:
-            GenerateError: If there is no token, the service cannot be reached, or it refuses
-                the request (the message is meant to be shown as-is).
+            GenerateError: If the service cannot be reached, or it refuses the request (the
+                message is meant to be shown as-is).
         """
-        token = (self._token_provider() or "").strip()
-        if not token:
-            raise GenerateError(_NO_TOKEN)
         body: dict[str, Any] = {
             "client": CLIENT_NAME,
             "note_id": int(note_id),
@@ -294,7 +278,7 @@ class GenerateClient:
         payload = self._transport(
             f"{self._base_url}{_GENERATE_PATH}",
             body,
-            {"Content-Type": "application/json", "X-Omnia-Token": token},
+            {"Content-Type": "application/json"},
         )
         if not isinstance(payload, dict):
             raise GenerateError("Anki returned an unexpected response.")
