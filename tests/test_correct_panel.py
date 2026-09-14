@@ -14,9 +14,11 @@ skipping one file. macOS and Windows run this for real.
 
 from __future__ import annotations
 
-import pytest
+import pytest  # noqa: F401 - imported so the module reads as a test module
 
-pytest.importorskip("PyQt6.QtWidgets")
+from conftest import requires_qt_widgets
+
+requires_qt_widgets()
 
 from omnia_desktop_clipper.lookup.check import to_correction
 from omnia_desktop_clipper.ui.correct_panel import CorrectionPanel
