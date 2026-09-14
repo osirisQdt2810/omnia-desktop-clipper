@@ -14,13 +14,20 @@ that into a skip. CI installs PyQt6 from requirements.txt; macOS and Windows run
 
 from __future__ import annotations
 
-import pytest  # noqa: F401 - imported so the module reads as a test module
+import pytest
 
 from conftest import requires_qt_widgets
 
+# BEFORE the imports below, which is the whole point: they pull in QtWidgets, so a module that
+# imported them first would raise at collection rather than skip. Hence the E402s.
 requires_qt_widgets()
 
-from omnia_desktop_clipper.ui.action_overlay import _BUTTON, _GAP, _PAD, ActionOverlay
+from omnia_desktop_clipper.ui.action_overlay import (  # noqa: E402
+    _BUTTON,
+    _GAP,
+    _PAD,
+    ActionOverlay,
+)
 
 
 @pytest.fixture(scope="module")
