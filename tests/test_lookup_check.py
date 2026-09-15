@@ -520,6 +520,24 @@ class TestSaving:
             client.save("   ")
         assert asked == []
 
+    def test_a_note_id_that_is_not_a_number_does_not_fail_the_save(self):
+        """Because by this point omnia has already written the note.
+
+        A bare ``int()`` raised ``ValueError`` here, which ``LookupService.save``'s broad except
+        reported as "The save failed unexpectedly." — contradicting the signal's own contract
+        ("The note was NOT written") and inviting a second press over a note that exists.
+        Nothing reads this field.
+        """
+        client = CheckClient(
+            "http://h:1",
+            transport=lambda *a: {"note_id": "not-a-number", "summary": "Saved."},
+        )
+
+        result = client.save("x", SPOKEN)
+
+        assert result.note_id == 0
+        assert result.summary == "Saved."
+
     def test_the_summary_comes_back(self):
         # omnia's own sentence, shown as-is: it names the deck and says when the note type had
         # to be renamed, which is the one thing about a save nobody can see for themselves.

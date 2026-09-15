@@ -361,9 +361,16 @@ class CorrectionPanel(QWidget):
             # reasons and a label written onto a widget is wiped by the next one.
             if self._on_save is not None:
                 kept = self._state.is_saved
-                save = QPushButton("Saved" if kept else "Save to Anki")
+                saving = self._state.saving and not kept
+                # All three labels come from STATE. "Saved" always did; "Saving…" did not, and
+                # that was the hole — `_clear()` destroys this button on every redraw, so
+                # opening an explanation mid-save rebuilt it as an enabled "Save to Anki" and
+                # the next press wrote a second note.
+                save = QPushButton(
+                    "Saved" if kept else "Saving…" if saving else "Save to Anki"
+                )
                 save.setObjectName("correctActive" if kept else "correctAction")
-                save.setEnabled(not kept)
+                save.setEnabled(not kept and not saving)
                 save.setCursor(Qt.CursorShape.PointingHandCursor)
                 save.clicked.connect(self._save)
                 head.addWidget(save)
@@ -382,7 +389,15 @@ class CorrectionPanel(QWidget):
         text.setWordWrap(True)
         text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(text)
-        if self._state.saved:
+        # Beside the correction, never instead of it. A failed save leaves a perfectly good
+        # correction on screen — routing it through `_state.error` made `_render` return before
+        # drawing the fixes, the rewrite, Copy, or the button to try again with.
+        if self._state.save_error:
+            said = QLabel(self._state.save_error)
+            said.setObjectName("correctWarn")
+            said.setWordWrap(True)
+            column.addWidget(said)
+        elif self._state.saved:
             said = QLabel(self._state.saved)
             said.setObjectName("correctGood")
             said.setWordWrap(True)
@@ -417,16 +432,17 @@ class CorrectionPanel(QWidget):
         The phrase is sent, not the correction: omnia looks it up again (a cache hit) and builds
         the note itself, which keeps note content out of this process's hands entirely.
         """
+        # `save_pending`, not `is_saved`: `is_saved` only becomes true when the ANSWER lands,
+        # and the window before that is exactly when a redraw used to re-arm the button.
         if (
             self._on_save is None
             or self._state.correction is None
-            or self._state.is_saved
+            or self._state.save_pending
         ):
             return
-        button = self._save_button
-        if button is not None:
-            button.setEnabled(False)
-            button.setText("Saving…")
+        self._state.saving_now()
+        self._render()
+        self._present(self._position, fresh=False)
         self._on_save(self._state.phrase, self._state.mode)
 
     def report_saved(self, ticket: int, summary: str) -> None:
@@ -443,10 +459,16 @@ class CorrectionPanel(QWidget):
         self._present(self._position, fresh=False)
 
     def report_save_failed(self, ticket: int, message: str) -> None:
-        """Show why a save did not happen, and let it be tried again."""
+        """Show why a save did not happen, beside the correction, and let it be tried again.
+
+        NOT through ``_state.error``: that channel means "there is no correction", and ``_render``
+        returns on it before drawing anything else. A save failing is not a correction failing —
+        the fixes, the rewrite and the Save button all have to survive it, or "tried again" is
+        not something the user can do.
+        """
         if ticket != self._state.ticket:
             return
-        self._state.error = message
+        self._state.save_failed(message)
         self._render()
         self._present(self._position, fresh=False)
 

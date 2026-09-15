@@ -264,10 +264,24 @@ class SaveResult:
     summary: str = ""
 
 
+def _note_id(value: Any) -> int:
+    """``value`` as a note id, or 0.
+
+    Tolerant on purpose. A bare ``int()`` here raised ``ValueError`` on anything non-numeric,
+    which ``LookupService.save``'s broad except turned into "The save failed unexpectedly." —
+    said about a note omnia had ALREADY written, whose natural answer is to press Save again and
+    write a second one. Nothing reads this field; it is not worth a duplicate note.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def to_save_result(payload: dict[str, Any]) -> SaveResult:
     """Convert the save payload into a dataclass, tolerating missing keys."""
     return SaveResult(
-        note_id=int(payload.get("note_id") or 0),
+        note_id=_note_id(payload.get("note_id")),
         deck=str(payload.get("deck") or ""),
         note_type=str(payload.get("note_type") or ""),
         renamed=bool(payload.get("renamed")),

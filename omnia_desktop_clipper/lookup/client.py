@@ -122,9 +122,7 @@ def _urllib_transport(url: str) -> dict[str, Any]:
     except (TimeoutError, OSError) as exc:
         raise LookupUnavailableError("The lookup timed out.") from exc
     except json.JSONDecodeError as exc:
-        raise LookupUnavailableError(
-            "The lookup service returned an unreadable response."
-        ) from exc
+        raise LookupUnavailableError("The lookup service returned an unreadable response.") from exc
 
 
 class LookupClient:
@@ -182,9 +180,7 @@ class LookupClient:
         url = f"{self._base_url}/lookup?{urlencode({'word': word, 'client': CLIENT_NAME})}"
         payload = self._transport(url)
         if not isinstance(payload, dict):
-            raise LookupUnavailableError(
-                "The lookup service returned an unexpected response."
-            )
+            raise LookupUnavailableError("The lookup service returned an unexpected response.")
         return self._to_view(word, payload)
 
     @staticmethod
