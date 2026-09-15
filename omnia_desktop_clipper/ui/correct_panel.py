@@ -64,7 +64,9 @@ class CorrectionPanel(QWidget):
     """A frameless, focusable panel showing what omnia says about a phrase."""
 
     def __init__(
-        self, on_check: Optional[Callable[[str, str, bool], None]] = None
+        self,
+        on_check: Optional[Callable[[str, str, bool], None]] = None,
+        on_save: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         """Build the (reusable, singleton) panel.
 
@@ -73,6 +75,9 @@ class CorrectionPanel(QWidget):
                 UI thread. The answer comes back through :meth:`apply_correction` /
                 :meth:`report_failure` rather than a callback, because a request started here
                 (the register toggle) and one started outside it land the same way.
+            on_save: ``(phrase, mode)`` asking omnia to keep this correction as a note, OFF the
+                UI thread. ``None`` hides the button. The answer comes back through
+                :meth:`report_saved`.
         """
         super().__init__(
             None,
@@ -81,9 +86,11 @@ class CorrectionPanel(QWidget):
             | Qt.WindowType.Tool,
         )
         self._on_check = on_check
+        self._on_save = on_save
         self._state = CorrectionState()
         self._position = (0, 0)
         self._copy_button: Optional[QPushButton] = None
+        self._save_button: Optional[QPushButton] = None
         self.setFixedWidth(_WIDTH)
 
         outer = QVBoxLayout(self)
@@ -169,9 +176,10 @@ class CorrectionPanel(QWidget):
 
     def _clear(self) -> None:
         """Install a fresh content widget and re-apply the appearance."""
-        # The old content owns the Copy button; drop the handle with it, or a later "Copied"
+        # The old content owns these buttons; drop the handles with them, or a later "Copied"
         # would be written onto a widget Qt has already deleted.
         self._copy_button = None
+        self._save_button = None
         if self._content is not None:
             self._shell.removeWidget(self._content)
             self._content.setParent(None)
@@ -254,8 +262,19 @@ class CorrectionPanel(QWidget):
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(8)
-        for index, fix in enumerate(correction.fixes):
+        for index, fix in enumerate(correction.visible_fixes):
             column.addWidget(self._fix_card(index, fix))
+        # Said out loud rather than silently cut: a list that stops without explanation reads as
+        # omnia having found that many, and the rest are on the card.
+        if correction.hidden_fixes:
+            count = correction.hidden_fixes
+            more = QLabel(
+                f"{count} more {'fix' if count == 1 else 'fixes'} — "
+                "all of them are kept if you save this."
+            )
+            more.setObjectName("lookupSubtitle")
+            more.setWordWrap(True)
+            column.addWidget(more)
         column.addStretch(1)
 
         area = QScrollArea()
@@ -338,6 +357,17 @@ class CorrectionPanel(QWidget):
         # from an older or a broken omnia even though the current one always sends it (its
         # parser refuses an answer with no rewritten sentence).
         if correction.rewritten:
+            # Drawn from STATE, not relabelled after the click: this panel redraws for its own
+            # reasons and a label written onto a widget is wiped by the next one.
+            if self._on_save is not None:
+                kept = self._state.is_saved
+                save = QPushButton("Saved" if kept else "Save to Anki")
+                save.setObjectName("correctActive" if kept else "correctAction")
+                save.setEnabled(not kept)
+                save.setCursor(Qt.CursorShape.PointingHandCursor)
+                save.clicked.connect(self._save)
+                head.addWidget(save)
+                self._save_button = save
             copy = QPushButton("Copy")
             copy.setObjectName("correctAction")
             copy.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -352,6 +382,11 @@ class CorrectionPanel(QWidget):
         text.setWordWrap(True)
         text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(text)
+        if self._state.saved:
+            said = QLabel(self._state.saved)
+            said.setObjectName("correctGood")
+            said.setWordWrap(True)
+            column.addWidget(said)
         return holder
 
     # -- actions -------------------------------------------------------------------------
@@ -373,6 +408,45 @@ class CorrectionPanel(QWidget):
 
     def _toggle_explanation(self, index: int) -> None:
         self._state.toggle_explanation(index)
+        self._render()
+        self._present(self._position, fresh=False)
+
+    def _save(self) -> None:
+        """Ask omnia to keep this correction as a note.
+
+        The phrase is sent, not the correction: omnia looks it up again (a cache hit) and builds
+        the note itself, which keeps note content out of this process's hands entirely.
+        """
+        if (
+            self._on_save is None
+            or self._state.correction is None
+            or self._state.is_saved
+        ):
+            return
+        button = self._save_button
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("Saving…")
+        self._on_save(self._state.phrase, self._state.mode)
+
+    def report_saved(self, ticket: int, summary: str) -> None:
+        """Show that the correction was kept, if it is still the one on screen.
+
+        Guarded by the ticket like every other answer: the note is written either way, and this
+        only decides whether anyone is told. Drawing into a panel the user has moved on from
+        would put "Saved" over somebody else's sentence.
+        """
+        if ticket != self._state.ticket:
+            return
+        self._state.keep(summary)
+        self._render()
+        self._present(self._position, fresh=False)
+
+    def report_save_failed(self, ticket: int, message: str) -> None:
+        """Show why a save did not happen, and let it be tried again."""
+        if ticket != self._state.ticket:
+            return
+        self._state.error = message
         self._render()
         self._present(self._position, fresh=False)
 

@@ -76,6 +76,11 @@ class CorrectionState:
     open_explanations: set[int] = field(default_factory=set)
     #: Which request the panel is waiting for. Only its answer is ever accepted.
     ticket: int = 0
+    #: omnia's sentence about where a saved card went, or "" when this one has not been saved.
+    #: Kept in the STATE rather than written onto the button: the panel redraws for its own
+    #: reasons (an explanation opening, a register switching), and a label poked into a widget
+    #: is wiped by the next redraw without anybody noticing.
+    saved: str = ""
 
     @property
     def waiting(self) -> bool:
@@ -95,6 +100,9 @@ class CorrectionState:
         self.correction = None
         self.error = ""
         self.open_explanations = set()
+        # A new request is a new card to keep. Carrying "Saved" across would put a disabled
+        # button over a correction nobody has kept.
+        self.saved = ""
         return self.ticket
 
     def accept(self, ticket: int, correction: Correction) -> bool:
@@ -122,6 +130,15 @@ class CorrectionState:
         self.error = message
         self.correction = None
         return True
+
+    def keep(self, summary: str) -> None:
+        """Remember that this correction was saved, and what Anki said about where."""
+        self.saved = summary or "Saved to Anki."
+
+    @property
+    def is_saved(self) -> bool:
+        """Whether this correction has already been kept."""
+        return bool(self.saved)
 
     def toggle_explanation(self, index: int) -> None:
         """Show, or hide, one fix's reason.

@@ -37,11 +37,25 @@ class _Checker:
 
     def __init__(self):
         self.calls: list[tuple[str, str, bool]] = []
+        self.saves: list[tuple[str, str]] = []
         self.released = threading.Event()
         self.started = threading.Event()
         self.answer = {"rewritten": "I went."}
         self.raises: Exception | None = None
+        self.save_raises: Exception | None = None
+        self.save_result = None
         self.block = False
+
+    def save(self, text, mode=""):
+        self.saves.append((text, mode))
+        self.started.set()
+        if self.block:
+            assert self.released.wait(5), "the save was never released"
+        if self.save_raises is not None:
+            raise self.save_raises
+        from omnia_desktop_clipper.lookup.check import to_save_result
+
+        return self.save_result or to_save_result({"summary": "Saved."})
 
     def check(self, text, mode="", refresh=False):
         self.calls.append((text, mode, refresh))
@@ -239,3 +253,104 @@ class TestWhichAnswersSurvive:
         assert checker.calls == [
             ("I have went.", "", False)
         ], "cancelling started a request"
+
+
+class TestSavingIsNotACheck:
+    """A save is a finished act, not a view of something — so it obeys different rules."""
+
+    def test_the_summary_comes_back_with_the_ticket(self, qapp):
+        checker = _Checker()
+        checker.save_result = type(
+            "R", (), {"summary": "Saved to Omnia::Phrase Check."}
+        )()
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[tuple] = []
+        service.saved.connect(lambda *args: seen.append(args))
+
+        service.save("I have went.", "spoken", 7)
+
+        assert _drain(qapp, lambda: seen)
+        assert seen[0][1] == "Saved to Omnia::Phrase Check."
+        assert seen[0][2] == 7
+        assert checker.saves == [("I have went.", "spoken")]
+
+    def test_a_second_save_does_not_supersede_the_first(self, qapp):
+        # The opposite of a check, and deliberately. Two saves in flight are two notes the user
+        # asked for; dropping the first because the second started would silently lose one.
+        slow = _Checker()
+        slow.block = True
+        service = LookupService(_NullClient(), checker=slow)
+        seen: list[str] = []
+        service.saved.connect(lambda phrase, _s, _t: seen.append(phrase))
+
+        service.save("first", "", 1)
+        assert slow.started.wait(5)
+        slow.block = False
+        service.save("second", "", 2)
+        slow.released.set()
+
+        assert _drain(qapp, lambda: len(seen) == 2), seen
+        assert sorted(seen) == ["first", "second"]
+
+    def test_a_new_selection_does_not_cancel_a_save(self, qapp):
+        # `cancel_check` abandons a correction because it is about text that is no longer
+        # selected. A save is already happening to the collection; abandoning it would mean the
+        # user pressed Save, the note was written, and nothing ever said so.
+        checker = _Checker()
+        checker.block = True
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[str] = []
+        service.saved.connect(lambda phrase, _s, _t: seen.append(phrase))
+
+        service.save("I have went.", "", 1)
+        assert checker.started.wait(5)
+        service.cancel_check()
+        service.lookup("something else")
+        checker.released.set()
+
+        assert _drain(qapp, lambda: seen), "the save was dropped along with the check"
+
+    def test_a_failure_says_why_and_carries_the_ticket(self, qapp):
+        checker = _Checker()
+        checker.save_raises = CheckError(
+            "Anki was busy — nothing was saved. Try again."
+        )
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[tuple] = []
+        service.save_failed.connect(lambda *args: seen.append(args))
+
+        service.save("x", "", 3)
+
+        assert _drain(qapp, lambda: seen)
+        assert "nothing was saved" in seen[0][1]
+        assert seen[0][2] == 3
+
+    def test_an_unexpected_error_does_not_leak(self, qapp):
+        checker = _Checker()
+        checker.save_raises = ValueError("an internal detail")
+        service = LookupService(_NullClient(), checker=checker)
+        seen: list[tuple] = []
+        service.save_failed.connect(lambda *args: seen.append(args))
+
+        service.save("x")
+
+        assert _drain(qapp, lambda: seen)
+        assert "internal detail" not in seen[0][1]
+
+    def test_an_empty_phrase_is_not_a_save(self, qapp):
+        checker = _Checker()
+        service = LookupService(_NullClient(), checker=checker)
+
+        service.save("   ")
+
+        assert checker.saves == []
+
+    def test_a_build_without_a_checker_says_so(self, qapp):
+        service = LookupService(_NullClient())
+        seen: list[tuple] = []
+        service.save_failed.connect(lambda *args: seen.append(args))
+
+        service.save("x", "", 5)
+
+        assert _drain(qapp, lambda: seen)
+        assert seen[0][2] == 5

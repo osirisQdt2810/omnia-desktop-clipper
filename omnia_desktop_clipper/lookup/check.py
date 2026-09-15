@@ -38,12 +38,18 @@ from typing import Any, Optional
 
 from .generate import Transport, error_body
 
+#: How many fixes omnia says the panel should list. Every fix still arrives — the saved card is
+#: built from the same answer, and the ones nobody had room for are the ones worth coming back
+#: to — so this is a display limit and nothing is dropped on the way in.
+DEFAULT_FIXES_SHOWN = 5
+
 #: The registers a phrase can be judged in. Sent as-is; omnia decides when it is empty.
 WRITTEN = "written"
 SPOKEN = "spoken"
 MODES = (WRITTEN, SPOKEN)
 
 _CHECK_PATH = "/check"
+_SAVE_PATH = "/check/save"
 
 # One model call on a phrase the user has selected and is watching a spinner for. Much shorter
 # than /generate's five minutes on purpose: that is several calls filling a whole note and may
@@ -65,7 +71,9 @@ _HTTP_HINTS = {
     # Not a setting — an update. The clipper ships separately from the add-on, so this is a
     # routine combination rather than an exotic one.
     404: (
-        "The Omnia add-on in Anki does not have Phrase Check.\n"
+        # Also what an omnia with Phrase Check but no SAVE route answers. One sentence covers
+        # both, because the remedy is the same and the user cannot tell them apart anyway.
+        "The Omnia add-on in Anki does not have this yet.\n"
         "Update it (Tools → Add-ons → Check for Updates), then try again."
     ),
     502: "Omnia could not check that phrase.",
@@ -117,6 +125,20 @@ class Correction:
     #: ``((text, is_new), …)`` — joined in order it is exactly :attr:`rewritten`, so a panel
     #: rendering the runs cannot show a sentence nobody wrote.
     highlight: tuple[tuple[str, bool], ...] = field(default_factory=tuple)
+    #: How many of :attr:`fixes` the panel should list, most important first. Not a cap on what
+    #: arrived: a saved card keeps every one.
+    shown: int = DEFAULT_FIXES_SHOWN
+
+    @property
+    def visible_fixes(self) -> tuple[Fix, ...]:
+        """The fixes the panel lists — the first :attr:`shown`, in the order omnia ranked them."""
+        limit = max(1, int(self.shown or DEFAULT_FIXES_SHOWN))
+        return self.fixes[:limit]
+
+    @property
+    def hidden_fixes(self) -> int:
+        """How many are being held back. Zero when everything is on screen."""
+        return max(0, len(self.fixes) - len(self.visible_fixes))
 
     @property
     def has_changes(self) -> bool:
@@ -178,7 +200,21 @@ def to_correction(payload: dict[str, Any]) -> Correction:
         changed=bool(payload.get("changed")),
         fixes=fixes,
         highlight=_as_runs(payload.get("highlight"), rewritten),
+        shown=_as_shown(payload.get("shown")),
     )
+
+
+def _as_shown(raw: Any) -> int:
+    """How many fixes to list, from a payload that may not say.
+
+    An older omnia sends no limit at all, and showing everything beats showing nothing — so the
+    fallback is the default rather than zero.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FIXES_SHOWN
+    return value if value > 0 else DEFAULT_FIXES_SHOWN
 
 
 def _urllib_transport(
@@ -215,8 +251,32 @@ def _urllib_transport(
     return payload
 
 
+@dataclass(frozen=True)
+class SaveResult:
+    """Where a saved correction went, as omnia reports it."""
+
+    note_id: int = 0
+    deck: str = ""
+    note_type: str = ""
+    renamed: bool = False
+    #: omnia's own sentence. Shown as-is: it names the deck, and says when the note type had to
+    #: be renamed, which is the one thing about a save nobody can see for themselves.
+    summary: str = ""
+
+
+def to_save_result(payload: dict[str, Any]) -> SaveResult:
+    """Convert the save payload into a dataclass, tolerating missing keys."""
+    return SaveResult(
+        note_id=int(payload.get("note_id") or 0),
+        deck=str(payload.get("deck") or ""),
+        note_type=str(payload.get("note_type") or ""),
+        renamed=bool(payload.get("renamed")),
+        summary=str(payload.get("summary") or "").strip() or "Saved to Anki.",
+    )
+
+
 class CheckClient:
-    """Asks omnia to correct a phrase."""
+    """Asks omnia to correct a phrase, and to keep one as a card."""
 
     def __init__(
         self,
@@ -262,3 +322,29 @@ class CheckClient:
         if not isinstance(payload, dict):
             raise CheckError("Anki returned an unexpected response.")
         return to_correction(payload)
+
+    def save(self, text: str, mode: str = "") -> SaveResult:
+        """Keep the correction for ``text`` as a note in Anki.
+
+        The PHRASE is sent, not the correction. omnia looks it up again — almost always a cache
+        hit — and builds the note itself; letting this app post note content into somebody's
+        collection would be a different feature with a different risk, and this one does not
+        need it.
+
+        Blocking. Short, but it waits on Anki's main thread, so call it from a worker.
+
+        Raises:
+            CheckError: If the service cannot be reached, or it refuses (the message is meant
+                to be shown as-is).
+        """
+        phrase = (text or "").strip()
+        if not phrase:
+            raise CheckError("There is nothing selected to save.")
+        payload = self._transport(
+            f"{self._base_url}{_SAVE_PATH}",
+            {"text": phrase, "mode": mode if mode in MODES else ""},
+            {"Content-Type": "application/json"},
+        )
+        if not isinstance(payload, dict):
+            raise CheckError("Anki returned an unexpected response.")
+        return to_save_result(payload)

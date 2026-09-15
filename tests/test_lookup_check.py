@@ -17,6 +17,7 @@ import threading
 import pytest
 
 from omnia_desktop_clipper.lookup.check import (
+    DEFAULT_FIXES_SHOWN,
     SPOKEN,
     WRITTEN,
     CheckClient,
@@ -442,3 +443,148 @@ class TestAgainstARealServer:
 
         with pytest.raises(CheckError, match="Is Anki running"):
             CheckClient(f"http://127.0.0.1:{dead}").check("x")
+
+
+class TestTheDisplayLimit:
+    """The panel lists a few; every fix still arrives, because the card keeps them all."""
+
+    def _many(self, shown=None):
+        payload = {
+            "rewritten": "I went.",
+            "fixes": [{"before": str(i), "after": "x"} for i in range(6)],
+        }
+        if shown is not None:
+            payload["shown"] = shown
+        return to_correction(payload)
+
+    def test_every_fix_arrives_whatever_the_limit(self):
+        # The ones nobody had room for are exactly the ones worth coming back to, and the saved
+        # card is built from the same answer.
+        assert len(self._many(shown=2).fixes) == 6
+
+    def test_only_the_first_few_are_listed(self):
+        correction = self._many(shown=2)
+
+        assert len(correction.visible_fixes) == 2
+        assert correction.visible_fixes == correction.fixes[:2]
+
+    def test_the_rest_are_counted(self):
+        assert self._many(shown=2).hidden_fixes == 4
+
+    def test_nothing_held_back_counts_zero(self):
+        assert self._many(shown=99).hidden_fixes == 0
+
+    def test_a_payload_with_no_limit_uses_the_default(self):
+        # An older omnia. Showing a sensible number beats showing none.
+        assert self._many().shown == DEFAULT_FIXES_SHOWN
+
+    def test_a_nonsense_limit_does_not_hide_everything(self):
+        for bad in (0, -3, "lots", None):
+            assert self._many(shown=bad).shown == DEFAULT_FIXES_SHOWN, bad
+            assert self._many(shown=bad).visible_fixes, bad
+
+
+class TestSaving:
+    def test_it_posts_the_phrase_and_the_register(self):
+        # The PHRASE, not the correction: omnia looks it up again and builds the note itself,
+        # which keeps note content out of this process's hands.
+        seen: list[dict] = []
+        client = CheckClient(
+            "http://127.0.0.1:8766",
+            transport=lambda url, body, headers: seen.append({"url": url, "body": body})
+            or {"summary": "Saved."},
+        )
+
+        client.save("I have went.", SPOKEN)
+
+        assert seen[0]["url"] == "http://127.0.0.1:8766/check/save"
+        assert seen[0]["body"] == {"text": "I have went.", "mode": "spoken"}
+        assert "fixes" not in seen[0]["body"]
+
+    def test_an_unknown_register_is_sent_empty(self):
+        seen: list[dict] = []
+        CheckClient(
+            "http://h:1",
+            transport=lambda url, body, headers: seen.append(body) or {"summary": "x"},
+        ).save("x", "shouted")
+
+        assert seen[0]["mode"] == ""
+
+    def test_an_empty_phrase_never_leaves_the_app(self):
+        asked: list[str] = []
+        client = CheckClient(
+            "http://h:1", transport=lambda url, body, headers: asked.append(url) or {}
+        )
+
+        with pytest.raises(CheckError, match="nothing selected"):
+            client.save("   ")
+        assert asked == []
+
+    def test_the_summary_comes_back(self):
+        # omnia's own sentence, shown as-is: it names the deck and says when the note type had
+        # to be renamed, which is the one thing about a save nobody can see for themselves.
+        client = CheckClient(
+            "http://h:1",
+            transport=lambda *a: {
+                "note_id": 7,
+                "deck": "Omnia::Phrase Check",
+                "note_type": "Omnia Phrase Check",
+                "renamed": True,
+                "summary": "Saved to Omnia::Phrase Check. The note type name you chose…",
+            },
+        )
+
+        result = client.save("x")
+
+        assert result.note_id == 7
+        assert result.deck == "Omnia::Phrase Check"
+        assert result.renamed is True
+        assert result.summary.startswith("Saved to")
+
+    def test_a_payload_with_no_summary_still_says_something(self):
+        result = CheckClient("http://h:1", transport=lambda *a: {}).save("x")
+
+        assert result.summary == "Saved to Anki."
+
+    def test_an_answer_that_is_not_an_object_is_refused(self):
+        client = CheckClient("http://h:1", transport=lambda *a: ["nope"])
+
+        with pytest.raises(CheckError, match="unexpected"):
+            client.save("x")
+
+
+class TestRememberingASave:
+    """The panel's side of it — state, not a label written onto a button."""
+
+    def test_a_fresh_request_has_not_been_saved(self):
+        state = CorrectionState()
+        state.start("x", WRITTEN)
+
+        assert state.is_saved is False
+        assert state.saved == ""
+
+    def test_keeping_it_records_what_anki_said(self):
+        state = CorrectionState()
+        state.start("x", WRITTEN)
+
+        state.keep("Saved to Omnia::Phrase Check.")
+
+        assert state.is_saved is True
+        assert state.saved == "Saved to Omnia::Phrase Check."
+
+    def test_a_save_with_no_sentence_still_counts_as_saved(self):
+        state = CorrectionState()
+        state.keep("")
+
+        assert state.is_saved is True
+
+    def test_a_new_request_forgets_it(self):
+        # A different answer is a different card. A disabled "Saved" button over a correction
+        # nobody has kept would be a lie about the collection.
+        state = CorrectionState()
+        state.start("x", WRITTEN)
+        state.keep("Saved.")
+
+        state.start("x", SPOKEN)
+
+        assert state.is_saved is False
