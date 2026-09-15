@@ -155,7 +155,9 @@ class ClipperApp(QObject):
         )
         # Its own panel, not a mode of the lookup one: they answer different questions about the
         # same selection, and a glance has to be enough to tell which is on screen.
-        self._correct_panel = CorrectionPanel(on_check=self._request_check)
+        self._correct_panel = CorrectionPanel(
+            on_check=self._request_check, on_save=self._request_save
+        )
         # Where the "+" was shown, so the panel opens next to the word you were reading.
         self._last_gesture_pos: tuple[int, int] = (0, 0)
         self._mouse_watcher = GlobalMouseWatcher(self._on_select_gesture)
@@ -490,6 +492,21 @@ class ClipperApp(QObject):
         """
         self._lookup.check(phrase, mode, refresh, self._correct_panel.ticket())
 
+    def _request_save(self, phrase: str, mode: str) -> None:
+        """The panel's Save button: keep this correction as a note, off the UI thread.
+
+        The ticket goes with it so a late answer can be matched against what is on screen. The
+        NOTE is written either way — that guard decides whether anyone is told, not whether the
+        work happens.
+        """
+        self._lookup.save(phrase, mode, self._correct_panel.ticket())
+
+    def _on_save_finished(self, phrase: str, summary: str, ticket: int) -> None:
+        self._correct_panel.report_saved(ticket, summary)
+
+    def _on_save_failed(self, phrase: str, message: str, ticket: int) -> None:
+        self._correct_panel.report_save_failed(ticket, message)
+
     def _on_check_finished(self, phrase: str, correction: object, ticket: int) -> None:
         self._correct_panel.apply_correction(ticket, correction)
 
@@ -599,6 +616,8 @@ class ClipperApp(QObject):
         )
         service.checked.connect(self._on_check_finished)
         service.check_failed.connect(self._on_check_failed)
+        service.saved.connect(self._on_save_finished)
+        service.save_failed.connect(self._on_save_failed)
         service.finished.connect(self._on_lookup_finished)
         service.failed.connect(self._on_lookup_failed)
         service.probed.connect(self._on_lookup_probed)

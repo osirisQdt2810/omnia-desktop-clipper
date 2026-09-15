@@ -64,6 +64,10 @@ class LookupService(QObject):
     checked = pyqtSignal(str, object, int)
     # (phrase, message, ticket) — the check could not run. The message is shown as-is.
     check_failed = pyqtSignal(str, str, int)
+    # (phrase, summary, ticket) — a correction was kept as a note, on the Qt main thread.
+    saved = pyqtSignal(str, str, int)
+    # (phrase, message, ticket) — it could not be. The note was NOT written.
+    save_failed = pyqtSignal(str, str, int)
 
     def __init__(
         self,
@@ -192,6 +196,41 @@ class LookupService(QObject):
                 self.generated.emit(note_id, outcome)
 
         self._spawn(work, name="omnia-generate")
+
+    def save(self, text: str, mode: str = "", ticket: int = 0) -> None:
+        """Keep a correction as a note, in the background; emits :attr:`saved` or
+        :attr:`save_failed`.
+
+        Unlike a check this does NOT supersede its predecessors, and must not: a save is a
+        finished act, not a view of something. Two saves in flight are two notes the user asked
+        for, and dropping the first because the second started would silently lose one.
+
+        It is not cancelled by a new selection either, for the same reason — :meth:`cancel_check`
+        deliberately leaves it alone. The ticket still travels so the PANEL can decide whether to
+        say anything; the note is written regardless.
+        """
+        phrase = (text or "").strip()
+        if not phrase:
+            return
+        if self._checker is None:
+            self.save_failed.emit(
+                phrase, "Saving a correction is not available in this build.", ticket
+            )
+            return
+        checker = self._checker
+
+        def work() -> None:
+            try:
+                result = checker.save(phrase, mode)
+            except CheckError as exc:
+                self.save_failed.emit(phrase, str(exc), ticket)
+                return
+            except Exception:
+                self.save_failed.emit(phrase, "The save failed unexpectedly.", ticket)
+                return
+            self.saved.emit(phrase, result.summary, ticket)
+
+        self._spawn(work, name="omnia-save")
 
     def cancel_check(self) -> None:
         """Abandon a check in flight, without starting one.

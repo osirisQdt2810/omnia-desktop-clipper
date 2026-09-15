@@ -52,8 +52,13 @@ def qapp():
 @pytest.fixture
 def panel(qapp):
     asked: list[tuple] = []
-    widget = CorrectionPanel(on_check=lambda *args: asked.append(args))
+    saves: list[tuple] = []
+    widget = CorrectionPanel(
+        on_check=lambda *args: asked.append(args),
+        on_save=lambda *args: saves.append(args),
+    )
     widget.asked = asked  # type: ignore[attr-defined]
+    widget.asked_saves = saves  # type: ignore[attr-defined]
     yield widget
     widget.hide()
     widget.deleteLater()
@@ -114,6 +119,37 @@ def _said(panel) -> str:
     from PyQt6.QtWidgets import QLabel
 
     return " ".join(label.text() for label in panel.findChildren(QLabel))
+
+
+def _fix_cards(panel) -> int:
+    """How many fix cards are on screen.
+
+    By object name, never by looking for the fix's text in :func:`_said`: the rewrite is rich
+    text and its inline style (``rgba(31,157,99,0.20)``) contains most of the digits, so a
+    fixture whose fixes are numbered "0".."5" appears to have all six on screen whatever was
+    drawn.
+    """
+    from PyQt6.QtWidgets import QLabel
+
+    return len(
+        [
+            label
+            for label in panel.findChildren(QLabel)
+            if label.objectName() == "fixBefore"
+        ]
+    )
+
+
+def _buttons(panel) -> list:
+    """Every button label currently on the panel.
+
+    Separate from :func:`_said`, which reads QLabels: a control's label is not something the
+    panel SAYS, and conflating them let one assertion pass because the summary sentence happened
+    to contain the word the button was supposed to show.
+    """
+    from PyQt6.QtWidgets import QPushButton
+
+    return [button.text() for button in panel.findChildren(QPushButton)]
 
 
 class TestWhatItDrawsForEachAnswer:
@@ -192,3 +228,151 @@ class TestWhatItDrawsForEachAnswer:
         panel._switch("written")
 
         assert panel.asked == []
+
+
+class TestKeepingACorrection:
+    """The Save button, and the state that remembers it worked."""
+
+    def _saved_panel(self, panel):
+        ticket = panel.start("I have went to the shop.", (10, 10))
+        panel.apply_correction(ticket, to_correction(_ANSWER))
+        return ticket
+
+    def test_pressing_it_asks_with_the_phrase_and_the_register(self, panel):
+        self._saved_panel(panel)
+
+        panel._save()
+
+        assert panel.asked_saves == [("I have went to the shop.", "written")]
+
+    def test_what_anki_said_is_shown(self, panel):
+        ticket = self._saved_panel(panel)
+
+        panel.report_saved(ticket, "Saved to Omnia::Phrase Check.")
+
+        assert "Saved to Omnia::Phrase Check." in _said(panel)
+
+    def test_it_survives_a_redraw(self, panel):
+        # The panel redraws for its own reasons; a label written onto the button would be wiped
+        # by the next one without anybody noticing.
+        ticket = self._saved_panel(panel)
+        panel.report_saved(ticket, "Saved to Omnia::Phrase Check.")
+
+        panel._toggle_explanation(0)
+
+        assert "Saved to Omnia::Phrase Check." in _said(panel), "the sentence was wiped"
+        assert "Saved" in _buttons(panel), "the button forgot it had saved"
+
+    def test_an_answer_for_an_abandoned_request_is_dropped(self, panel):
+        stale = self._saved_panel(panel)
+        panel.start("something else", (10, 10))
+
+        panel.report_saved(stale, "Saved to the wrong place.")
+
+        assert "wrong place" not in _said(panel)
+
+    def test_a_failure_says_why(self, panel):
+        ticket = self._saved_panel(panel)
+
+        panel.report_save_failed(ticket, "Anki was busy — nothing was saved.")
+
+        assert "nothing was saved" in _said(panel)
+
+    def test_a_failure_leaves_the_correction_on_screen(self, panel):
+        # It used to go through `_state.error`, which means "there is no correction" — `_render`
+        # returns on it before drawing anything else, so a transient "Anki was busy" replaced
+        # the fixes, the rewrite, Copy and Save with one line of red text. The old test above
+        # passed anyway: it asserts only that the message appears.
+        ticket = self._saved_panel(panel)
+
+        panel.report_save_failed(ticket, "Anki was busy — nothing was saved.")
+
+        said = _said(panel)
+        assert "CORRECTED" in said, "the rewrite was thrown away"
+        assert _fix_cards(panel) == 1, "the fix list was thrown away"
+        assert "Copy" in _buttons(panel), "the rest of the panel went with it"
+
+    def test_a_failure_leaves_a_button_to_try_again_with(self, panel):
+        # "and let it be tried again" is in the docstring; it has to be true of the screen.
+        ticket = self._saved_panel(panel)
+
+        panel.report_save_failed(ticket, "Anki was busy — nothing was saved.")
+
+        assert "Save to Anki" in _buttons(panel)
+        panel._save()
+        assert panel.asked_saves == [("I have went to the shop.", "written")]
+
+    def test_a_second_press_does_nothing(self, panel):
+        ticket = self._saved_panel(panel)
+        panel.report_saved(ticket, "Saved.")
+
+        panel._save()
+
+        assert panel.asked_saves == [], "it saved the same correction twice"
+
+    def test_a_redraw_while_saving_does_not_re_arm_the_button(self, panel):
+        # The case that mutates the collection. "Saving…" used to be set on the widget, and
+        # `_clear()` destroys that widget on every redraw — so opening an explanation during
+        # the round trip (up to 90s of real work on Anki's main thread) rebuilt the button as
+        # an enabled "Save to Anki", and the next press wrote a SECOND note. Nothing downstream
+        # dedupes: LookupService.save deliberately does not supersede.
+        self._saved_panel(panel)
+        panel._save()
+        assert panel.asked_saves == [("I have went to the shop.", "written")]
+
+        panel._toggle_explanation(0)
+
+        assert "Saving…" in _buttons(panel), "the redraw forgot a save was in flight"
+        assert "Save to Anki" not in _buttons(panel), "the button came back live"
+
+        panel._save()
+        assert len(panel.asked_saves) == 1, "one phrase became two notes"
+
+    def test_the_button_says_it_is_saving(self, panel):
+        self._saved_panel(panel)
+
+        panel._save()
+
+        assert "Saving…" in _buttons(panel)
+
+    def test_a_new_answer_offers_to_save_again(self, panel):
+        ticket = self._saved_panel(panel)
+        panel.report_saved(ticket, "Saved.")
+
+        second = panel.start("I have went to the shop.", (10, 10))
+        panel.apply_correction(second, to_correction(_ANSWER))
+
+        assert "Save to Anki" in _buttons(panel)
+        assert "Saved." not in _said(panel)
+
+    def test_a_panel_with_no_saver_offers_no_button(self, qapp):
+        from omnia_desktop_clipper.ui.correct_panel import CorrectionPanel
+
+        widget = CorrectionPanel(on_check=lambda *a: None)
+        try:
+            ticket = widget.start("x", (10, 10))
+            widget.apply_correction(ticket, to_correction(_ANSWER))
+
+            assert "Save to Anki" not in _buttons(widget)
+        finally:
+            widget.hide()
+            widget.deleteLater()
+
+
+class TestTheDisplayLimitOnScreen:
+    def test_only_the_visible_fixes_are_drawn(self, panel):
+        payload = dict(_ANSWER)
+        payload["fixes"] = [
+            {"before": str(i), "after": "x", "why": "w"} for i in range(6)
+        ]
+        payload["shown"] = 2
+        ticket = panel.start("x", (10, 10))
+
+        panel.apply_correction(ticket, to_correction(payload))
+
+        said = _said(panel)
+        assert "4 more fixes" in said, said
+        assert "kept if you save" in said
+        # The name promises the fixes are LIMITED, so check that rather than only the line
+        # explaining the limit.
+        assert _fix_cards(panel) == 2

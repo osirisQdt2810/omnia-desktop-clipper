@@ -116,6 +116,10 @@ def _rgba(hex_color: str, alpha: float) -> str:
 _CORRECTION_ACCENT = "#1f9d63"
 #: What was written, on its way out. Red enough to read as "this was wrong" without shouting.
 _CORRECTION_BEFORE = "#c0554c"
+#: A save that did not happen, reported BESIDE a correction that is still good. Amber rather
+#: than the red above: that red says "this text was wrong", and the text is not the problem —
+#: one press did not work and can be repeated.
+_SAVE_FAILED = "#b06f16"
 
 
 def correction_accent() -> str:
@@ -175,6 +179,10 @@ def stylesheet(colors: Palette) -> str:
     #correctGood {{
         font-size: 13px; color: {correct};
         background: {correct_soft}; border-radius: 8px; padding: 9px 11px;
+    }}
+    #correctWarn {{
+        font-size: 13px; color: {_SAVE_FAILED};
+        background: rgba(176, 111, 22, 0.10); border-radius: 8px; padding: 9px 11px;
     }}
     QPushButton#correctAction {{
         background: transparent;

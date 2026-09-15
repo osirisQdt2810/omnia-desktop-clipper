@@ -76,6 +76,19 @@ class CorrectionState:
     open_explanations: set[int] = field(default_factory=set)
     #: Which request the panel is waiting for. Only its answer is ever accepted.
     ticket: int = 0
+    #: omnia's sentence about where a saved card went, or "" when this one has not been saved.
+    #: Kept in the STATE rather than written onto the button: the panel redraws for its own
+    #: reasons (an explanation opening, a register switching), and a label poked into a widget
+    #: is wiped by the next redraw without anybody noticing.
+    saved: str = ""
+    #: Whether a save is in flight. Here for exactly the reason ``saved`` is: the panel redraws
+    #: for its own reasons, ``_clear()`` destroys the button, and a "Saving…" label written onto
+    #: that widget comes back as an enabled "Save to Anki" — which is a second note.
+    saving: bool = False
+    #: Why the last save did not happen. SEPARATE from ``error``, which means "there is no
+    #: correction" and makes the renderer draw nothing else. A failed save leaves a perfectly
+    #: good correction on screen, so it reports beside it rather than in place of it.
+    save_error: str = ""
 
     @property
     def waiting(self) -> bool:
@@ -95,6 +108,12 @@ class CorrectionState:
         self.correction = None
         self.error = ""
         self.open_explanations = set()
+        # A new request is a new card to keep. Carrying "Saved" across would put a disabled
+        # button over a correction nobody has kept — and carrying either of the other two would
+        # show a new correction as mid-save, or explain a failure that was about the last one.
+        self.saved = ""
+        self.saving = False
+        self.save_error = ""
         return self.ticket
 
     def accept(self, ticket: int, correction: Correction) -> bool:
@@ -122,6 +141,35 @@ class CorrectionState:
         self.error = message
         self.correction = None
         return True
+
+    def keep(self, summary: str) -> None:
+        """Remember that this correction was saved, and what Anki said about where."""
+        self.saved = summary or "Saved to Anki."
+        self.saving = False
+        self.save_error = ""
+
+    def saving_now(self) -> None:
+        """Note that a save has been asked for and not yet answered."""
+        self.saving = True
+        self.save_error = ""
+
+    def save_failed(self, message: str) -> None:
+        """Note that the save did not happen, and why.
+
+        The correction is untouched: it is still correct, and only the save failed.
+        """
+        self.saving = False
+        self.save_error = message or "The save failed."
+
+    @property
+    def save_pending(self) -> bool:
+        """Whether a save has been asked for and must not be asked for again."""
+        return self.saving or self.is_saved
+
+    @property
+    def is_saved(self) -> bool:
+        """Whether this correction has already been kept."""
+        return bool(self.saved)
 
     def toggle_explanation(self, index: int) -> None:
         """Show, or hide, one fix's reason.
